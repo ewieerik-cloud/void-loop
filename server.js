@@ -21,7 +21,7 @@ const io     = new Server(server, {
 });
 
 // Serve static files (index.html, assets) from same directory
-app.use(express.static(path.join(__dirname)));
+app.use(express.static(path.join(__dirname, 'public')));
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 /* ──────────────────────────────────────────────
@@ -186,5 +186,5 @@ function nextFreeIdx(room) {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`VOID LOOP server running on http://localhost:${PORT}`);
-  console.log('Place index.html in the same directory and run: node server.js');
+  console.log('Place index.html in /public and run: node server.js');
 });
