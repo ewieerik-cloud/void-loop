@@ -1933,32 +1933,35 @@ function addCallout(txt,drama,col='#ffffff',matrix=false){
   callouts.push({txt,t:dur,maxT:dur,drama:!!drama,col,side,matrix:!!matrix});
 }
 
-// ── Global invincibility helper — covers all invincible states ──
+// ── Global invincibility helper ──────────────────────────────
 function isInvincible(){
-  // Dead players in multiplayer are immune — they're already dead
-  if(_playerDead[0]&&_mpMode==='host')return true;
-  if(_playerDead[_myPlayerIdx]&&_mpMode==='guest')return true;
+  // Downed players in MP are immune (prevents re-triggering death)
+  if(_mpMode==='host'  && _playerDead[0]) return true;
+  if(_mpMode==='guest' && _playerDead[_myPlayerIdx]) return true;
   return !!(effect&&(effect.type==='invincible'||effect.type==='bomb'))||!!slashPhase?.cin;
 }
 
 function killPlayer(){
   if(MODE==='dead')return;
-  // In multiplayer (host), mark this player dead but keep game running
-  if(_mpMode==='host'&&Object.keys(_guestInputs).length>0){
-    if(_playerDead[0])return; // already dead
+  // ── Multiplayer (HOST): mark local player downed, keep game alive if partner alive ──
+  if(_mpMode==='host' && Object.keys(_guestInputs).length>0){
+    if(_playerDead[0])return; // already downed
     _playerDead[0]=true;
     diedInMatrix=!!matrixState;
     matrixState=null;matrixLines=[];poisonPills=[];matrixGlitch=0;matrixGlitchTimer=0;
     redPillActive=false;redPillPhasesLeft=0;redPillSpeedMult=1;
     FX_DEATH(player.x,player.y);snd('death');
     if(survivalTime>BEST)BEST=survivalTime;
-    // Check if all players dead → true game over
-    const allDead=Object.keys(_guestInputs).every(idx=>_playerDead[+idx]);
-    if(allDead){stopMusic();deadTimer=DEAD_DELAY;deadAge=0;MODE='dead';}
-    else addCallout('PILOT DOWN — REVIVE?',false,'#888888');
+    const allDead=Object.keys(_guestInputs).every(i=>_playerDead[+i]);
+    if(allDead){
+      stopMusic();deadTimer=DEAD_DELAY;deadAge=0;MODE='dead';
+      _socket?.emit('game_over',{pts:points,st:survivalTime,ph:phase});
+    } else {
+      addCallout('PILOT DOWN \u2014 REVIVE?',false,'#888888');
+    }
     return;
   }
-  // Solo or guest death
+  // ── Solo or Guest ──
   diedInMatrix=!!matrixState;
   matrixState=null;matrixLines=[];poisonPills=[];matrixGlitch=0;matrixGlitchTimer=0;
   redPillActive=false;redPillPhasesLeft=0;redPillSpeedMult=1;
@@ -1968,9 +1971,21 @@ function killPlayer(){
   deadTimer=DEAD_DELAY;deadAge=0;MODE='dead';
 }
 
-/* ══════════════════════════════════════════════════════════════
-   §10  GAME UPDATE
-══════════════════════════════════════════════════════════════ */
+/** HOST: kill a guest player by index. Checks if all players are now dead. */
+function _killGuestPlayer(idx){
+  if(_playerDead[idx])return;
+  _playerDead[idx]=true;
+  const gp=_remotePlayers[idx];
+  if(gp){FX_DEATH(gp.x,gp.y);snd('death');}
+  const allDead=_playerDead[0]&&Object.keys(_guestInputs).every(i=>_playerDead[+i]);
+  if(allDead){
+    if(survivalTime>BEST)BEST=survivalTime;
+    stopMusic();deadTimer=DEAD_DELAY;deadAge=0;MODE='dead';
+    _socket?.emit('game_over',{pts:points,st:survivalTime,ph:phase});
+  } else {
+    addCallout('PILOT DOWN \u2014 REVIVE?',false,'#888888');
+  }
+}
 function gameUpdate(dt,ts){
   const _rawDt=dt;
   if(slashPhase&&slashPhase.cin&&slashPhase.gameTimeScale<1.0)dt=dt*slashPhase.gameTimeScale;
@@ -1991,33 +2006,35 @@ function gameUpdate(dt,ts){
     if(_bossPhaseTimer<=0){_bossPhaseTimer=0;endBossPhase();}
   }
 
-  // Player movement
-  let ax=0,ay=0;
-  if(KEYS['ArrowLeft']||KEYS['a']||KEYS['A'])ax-=CFG.P_ACCEL;
-  if(KEYS['ArrowRight']||KEYS['d']||KEYS['D'])ax+=CFG.P_ACCEL;
-  if(KEYS['ArrowUp']||KEYS['w']||KEYS['W'])ay-=CFG.P_ACCEL;
-  if(KEYS['ArrowDown']||KEYS['s']||KEYS['S'])ay+=CFG.P_ACCEL;
-  player.vx+=ax*dt;player.vy+=ay*dt;
-  const pf=Math.exp(-CFG.P_DAMP*dt);player.vx*=pf;player.vy*=pf;
-  const ps=Math.sqrt(player.vx**2+player.vy**2);
-  if(ps>CFG.P_MAX_SPEED){player.vx=player.vx/ps*CFG.P_MAX_SPEED;player.vy=player.vy/ps*CFG.P_MAX_SPEED;}
-  player.x+=player.vx*dt;player.y+=player.vy*dt;
+  // Player movement — frozen when host is downed in MP (ghost stays in place)
+  if(!(_playerDead[0]&&_mpMode==='host')){
+    let ax=0,ay=0;
+    if(KEYS['ArrowLeft']||KEYS['a']||KEYS['A'])ax-=CFG.P_ACCEL;
+    if(KEYS['ArrowRight']||KEYS['d']||KEYS['D'])ax+=CFG.P_ACCEL;
+    if(KEYS['ArrowUp']||KEYS['w']||KEYS['W'])ay-=CFG.P_ACCEL;
+    if(KEYS['ArrowDown']||KEYS['s']||KEYS['S'])ay+=CFG.P_ACCEL;
+    player.vx+=ax*dt;player.vy+=ay*dt;
+    const pf=Math.exp(-CFG.P_DAMP*dt);player.vx*=pf;player.vy*=pf;
+    const ps=Math.sqrt(player.vx**2+player.vy**2);
+    if(ps>CFG.P_MAX_SPEED){player.vx=player.vx/ps*CFG.P_MAX_SPEED;player.vy=player.vy/ps*CFG.P_MAX_SPEED;}
+    player.x+=player.vx*dt;player.y+=player.vy*dt;
 
-  // Trail
-  player.trail.push({x:player.x,y:player.y,ts});
-  while(player.trail.length>CFG.TRAIL_MAX_PTS)player.trail.shift();
-  const cutoff=ts-CFG.TRAIL_DURATION*1000;
-  while(player.trail.length>0&&player.trail[0].ts<cutoff)player.trail.shift();
+    // Trail
+    player.trail.push({x:player.x,y:player.y,ts});
+    while(player.trail.length>CFG.TRAIL_MAX_PTS)player.trail.shift();
+    const cutoff=ts-CFG.TRAIL_DURATION*1000;
+    while(player.trail.length>0&&player.trail[0].ts<cutoff)player.trail.shift();
 
-  // Wall
-  const inv=effect?.type==='invincible';
-  if(CFG.WRAP_WALLS){
-    if(player.x-CFG.P_RADIUS<AX){player.x=AX+AS-CFG.P_RADIUS;wrapFlash.push({side:'R',t:0,dur:0.45});_wallWarp.push({side:'L',t:0.5,dur:0.5,x:AX,y:player.y});snd('wall_pass');}
-    if(player.x+CFG.P_RADIUS>AX+AS){player.x=AX+CFG.P_RADIUS;wrapFlash.push({side:'L',t:0,dur:0.45});_wallWarp.push({side:'R',t:0.5,dur:0.5,x:AX+AS,y:player.y});snd('wall_pass');}
-    if(player.y-CFG.P_RADIUS<AY){player.y=AY+AS-CFG.P_RADIUS;wrapFlash.push({side:'B',t:0,dur:0.45});_wallWarp.push({side:'T',t:0.5,dur:0.5,x:player.x,y:AY});snd('wall_pass');}
-    if(player.y+CFG.P_RADIUS>AY+AS){player.y=AY+CFG.P_RADIUS;wrapFlash.push({side:'T',t:0,dur:0.45});_wallWarp.push({side:'B',t:0.5,dur:0.5,x:player.x,y:AY+AS});snd('wall_pass');}
-  }else if(!inv){
-    if(player.x-CFG.P_RADIUS<AX||player.x+CFG.P_RADIUS>AX+AS||player.y-CFG.P_RADIUS<AY||player.y+CFG.P_RADIUS>AY+AS){killPlayer();return;}
+    // Wall
+    const inv=effect?.type==='invincible';
+    if(CFG.WRAP_WALLS){
+      if(player.x-CFG.P_RADIUS<AX){player.x=AX+AS-CFG.P_RADIUS;wrapFlash.push({side:'R',t:0,dur:0.45});_wallWarp.push({side:'L',t:0.5,dur:0.5,x:AX,y:player.y});snd('wall_pass');}
+      if(player.x+CFG.P_RADIUS>AX+AS){player.x=AX+CFG.P_RADIUS;wrapFlash.push({side:'L',t:0,dur:0.45});_wallWarp.push({side:'R',t:0.5,dur:0.5,x:AX+AS,y:player.y});snd('wall_pass');}
+      if(player.y-CFG.P_RADIUS<AY){player.y=AY+AS-CFG.P_RADIUS;wrapFlash.push({side:'B',t:0,dur:0.45});_wallWarp.push({side:'T',t:0.5,dur:0.5,x:player.x,y:AY});snd('wall_pass');}
+      if(player.y+CFG.P_RADIUS>AY+AS){player.y=AY+CFG.P_RADIUS;wrapFlash.push({side:'T',t:0,dur:0.45});_wallWarp.push({side:'B',t:0.5,dur:0.5,x:player.x,y:AY+AS});snd('wall_pass');}
+    }else if(!inv){
+      if(player.x-CFG.P_RADIUS<AX||player.x+CFG.P_RADIUS>AX+AS||player.y-CFG.P_RADIUS<AY||player.y+CFG.P_RADIUS>AY+AS){killPlayer();return;}
+    }
   }
 
   // Enemies
@@ -2055,15 +2072,51 @@ function gameUpdate(dt,ts){
       // Normal: enemies kill player
       for(const e of enemies)if((e.spawnAge||0)>=1.5&&dst(player.x,player.y,e.x,e.y)<CFG.P_RADIUS+CFG.E_RADIUS){killPlayer();return;}
     }
+    // ── Guest enemy collision (host-authoritative) ───────────────────
+    // Host checks each connected guest's position against enemies.
+    // This makes guests full participants — they can die from enemies too.
+    if(_mpMode==='host'){
+      for(const ridxStr in _guestInputs){
+        const ridx=+ridxStr;
+        const gp=_remotePlayers[ridx];
+        if(!gp||_playerDead[ridx])continue; // skip if already downed
+        for(const e of enemies){
+          if((e.spawnAge||0)>=1.5&&dst(gp.x,gp.y,e.x,e.y)<CFG.P_RADIUS+CFG.E_RADIUS){
+            _killGuestPlayer(ridx);
+            break;
+          }
+        }
+        if(MODE!=='play')return; // _killGuestPlayer may have ended game
+      }
+    }
   }
   if(_redPillSafeFrames>0)_redPillSafeFrames--;
   if(MODE!=='play')return;
 
   // Orbs — run during mini bosses (only blocked by real boss phases)
+  // Both the host player AND all connected guests can collect orbs.
   if(grp&&!(slashPhase&&!slashPhase.mini)&&!(shooterPhase&&!shooterPhase.mini)&&!manPhase){
     const mag=effect?.type==='magnet',magR=CFG.P_RADIUS*CFG.MAGNET_RFACTOR;
     const orbR=CFG.C_RADIUS*(1+orbStreak*0.2), orbPts=CFG.SCORE_PER_COLL+orbStreak*10;
-    for(const c of colls){if(c.done)continue;const d=dst(player.x,player.y,c.x,c.y);if(d<CFG.P_RADIUS+orbR||(mag&&d<magR)){c.done=true;points+=orbPts;addFloatText('+'+orbPts,c.x,c.y,CFG.COL.coll);FX_COLLECT(c.x,c.y);sndOrb();}}
+    // Build list of active (alive) player positions to check this frame
+    const _collectors=[];
+    if(!(_playerDead[0]&&_mpMode==='host'))_collectors.push({x:player.x,y:player.y,isHost:true});
+    if(_mpMode==='host'){
+      for(const ri in _guestInputs){
+        const ridx=+ri,gp=_remotePlayers[ridx];
+        if(gp&&!_playerDead[ridx])_collectors.push({x:gp.x,y:gp.y,isHost:false});
+      }
+    }
+    for(const c of colls){
+      if(c.done)continue;
+      for(const pp of _collectors){
+        const d=dst(pp.x,pp.y,c.x,c.y);
+        if(d<CFG.P_RADIUS+orbR||(pp.isHost&&mag&&d<magR)){
+          c.done=true;points+=orbPts;addFloatText('+'+orbPts,c.x,c.y,CFG.COL.coll);FX_COLLECT(c.x,c.y);sndOrb();
+          break;
+        }
+      }
+    }
     if(colls.length>0&&colls.every(c=>c.done)){
       // Streak: collected all with >50% time left
       if(grp.timer>=grp.maxT*0.50){orbStreak=Math.min(orbStreak+1,5);if(orbStreak>0)addCallout('STREAK '+orbStreak,false,'#44aaff');}
@@ -2073,8 +2126,14 @@ function gameUpdate(dt,ts){
     else{grp.timer-=dt;if(grp.timer<=0){orbStreak=0;killPlayer();return;}}
   }
 
-  // Pickup life + collection
-  if(pickup){pickup.life-=dt;if(pickup.life<=0)pickup=null;else if(dst(player.x,player.y,pickup.x,pickup.y)<CFG.P_RADIUS+CFG.PU_RADIUS){activatePickup(pickup.type);pickup=null;}}
+  // Pickup life + collection — only host's living player collects pickups
+  if(pickup){
+    pickup.life-=dt;
+    if(pickup.life<=0){pickup=null;}
+    else if(!(_playerDead[0]&&_mpMode==='host')&&dst(player.x,player.y,pickup.x,pickup.y)<CFG.P_RADIUS+CFG.PU_RADIUS){
+      activatePickup(pickup.type);pickup=null;
+    }
+  }
 
   // Effect tick
   if(effect){
@@ -2225,19 +2284,29 @@ function render(ts){
     }
   }
 
-  // Player (local) — hide when dead in multiplayer (ghost is shown by mpDrawLocalDeadOverlay)
-  if(player&&MODE!=='dead'&&!(_playerDead[_myPlayerIdx]&&_mpMode!=='solo')){
-    const pDotCol=LOBBY[0]?.color||CFG.COL.player; // player-chosen color for inner dot
-    const inv2=effect?.type==='invincible',dim2=effect?.type==='dimshift';
-    // Outer body: white neon purple always (unless effect override)
-    const outerCol=inv2?'#ffff88':dim2?'#ccaaff':'#ffffff';
-    const gc=inv2?'#ffff00':dim2?'#9966ff':CFG.COL.p_glow;
-    X.save();
-    let fa=1;if(effect&&effect.t>0&&effect.t<2)fa=0.28+0.72*Math.abs(Math.sin(effect.t*Math.PI*7));
-    X.globalAlpha=fa;X.shadowColor=gc;X.shadowBlur=36;X.fillStyle=outerCol;X.beginPath();X.arc(player.x,player.y,CFG.P_RADIUS,0,PI2);X.fill();
-    // Inner dot = player chosen color
-    X.shadowBlur=8;X.shadowColor=pDotCol;X.fillStyle=pDotCol;X.beginPath();X.arc(player.x,player.y,CFG.P_RADIUS*0.38,0,PI2);X.fill();
-    X.globalAlpha=1;X.restore();
+  // Player (local) — render ghost when downed in MP; hide completely only when MODE='dead'
+  const _hostDowned = _mpMode==='host' && _playerDead[0];
+  const _guestDowned = _mpMode==='guest' && _playerDead[_myPlayerIdx];
+  if(player&&MODE!=='dead'){
+    if(_hostDowned||_guestDowned){
+      // Draw ghost (dim, gray) — the overlay will render on top
+      X.save();X.globalAlpha=0.28;X.shadowColor='#888';X.shadowBlur=10;
+      X.fillStyle='#aaaaaa';X.beginPath();X.arc(player.x,player.y,CFG.P_RADIUS,0,PI2);X.fill();
+      X.fillStyle='#555';X.shadowBlur=0;X.beginPath();X.arc(player.x,player.y,CFG.P_RADIUS*0.38,0,PI2);X.fill();
+      X.restore();
+    } else {
+      const pDotCol=LOBBY[0]?.color||CFG.COL.player; // player-chosen color for inner dot
+      const inv2=effect?.type==='invincible',dim2=effect?.type==='dimshift';
+      // Outer body: white neon purple always (unless effect override)
+      const outerCol=inv2?'#ffff88':dim2?'#ccaaff':'#ffffff';
+      const gc=inv2?'#ffff00':dim2?'#9966ff':CFG.COL.p_glow;
+      X.save();
+      let fa=1;if(effect&&effect.t>0&&effect.t<2)fa=0.28+0.72*Math.abs(Math.sin(effect.t*Math.PI*7));
+      X.globalAlpha=fa;X.shadowColor=gc;X.shadowBlur=36;X.fillStyle=outerCol;X.beginPath();X.arc(player.x,player.y,CFG.P_RADIUS,0,PI2);X.fill();
+      // Inner dot = player chosen color
+      X.shadowBlur=8;X.shadowColor=pDotCol;X.fillStyle=pDotCol;X.beginPath();X.arc(player.x,player.y,CFG.P_RADIUS*0.38,0,PI2);X.fill();
+      X.globalAlpha=1;X.restore();
+    }
   }
 
   mpDrawPlayers(ts); // draw remote players (all modes)
@@ -2356,14 +2425,11 @@ function render(ts){
 
   drawHUD(ts);
   drawCallouts(ts);
-  // In MP: if local player died but game is still running (partner alive), show arena with overlay
-  if(MODE==='dead'){
-    if(_mpMode!=='solo'&&_playerDead[_myPlayerIdx]!==undefined){
-      // Don't draw full dead screen — just the gray overlay is handled by mpDrawLocalDeadOverlay
-    } else {
-      drawDead(ts);
-    }
-  }
+  // Dead screen logic:
+  // - MP downed (local player dead but game still running): show gray overlay only — mpDrawLocalDeadOverlay handles it
+  // - Full game over (MODE='dead'): show the real dead screen
+  const _mpDowned = _mpMode!=='solo' && _playerDead[_myPlayerIdx] && MODE==='play';
+  if(MODE==='dead' && !_mpDowned) drawDead(ts);
   if(_paused)drawPause(ts);
   X.restore();
 }
@@ -2788,19 +2854,6 @@ function drawLobby(ts){
     uiBtn('BACK',cx-50,linkY+208,100,34,'lobby_back');
   }
   drawAudioWidget(ts);
-
-  // ── DEBUG PANEL (bottom of screen, remove when stable) ──────
-  const dbg = [
-    'socket: ' + (_socket ? (_socket.connected ? 'CONNECTED id='+_socket.id.slice(0,8) : 'DISCONNECTED') : 'NULL'),
-    'mode='+_mpMode+' room='+(_mpRoomCode||'none')+' idx='+_myPlayerIdx+' last_evt='+_mpLastEvent,
-    'lobby: ' + JSON.stringify(LOBBY.map(p=>p?.name||'?')),
-  ];
-  X.save();
-  X.font = `9px ${FM}`; X.textAlign = 'left'; X.textBaseline = 'bottom';
-  X.fillStyle = '#222'; X.fillRect(0, H - 42, W, 42);
-  X.fillStyle = '#0f0'; X.shadowBlur = 0;
-  dbg.forEach((line, i) => X.fillText(line, 8, H - 28 + i * 13));
-  X.restore();
 }
 
 function drawDead(ts){
@@ -3015,28 +3068,40 @@ C.addEventListener('click',e=>{
                     ? LOBBY[0].color : PLAYER_COLORS[1];
       _socket.emit('join_room',{roomCode:_mpJoinInput.toUpperCase(),name,color});
     }
-    // LAUNCH — emit first, then both host+guest start via socket event
+    // LAUNCH — host calls init() immediately (no echo race), guests receive game_start
     if(inBtn(BTNS.launch)){
       if(_mpMode==='host'&&_socket){
-        _mpLastEvent = 'LAUNCH_clicked_emitting';
-        _socket.emit('game_start');
+        _mpLastEvent = 'LAUNCH_clicked';
+        _lastTs=performance.now();
+        init();                       // host starts right now
+        _socket.emit('game_start');   // guests will receive this and call init()
       } else if(_mpMode!=='guest'){
         _lastTs=performance.now(); init();
       }
     }
     if(inBtn(BTNS.lobby_back)){
+      // Tell server we're leaving the room (before clearing local state)
+      if(_socket&&_mpRoomCode) _socket.emit('leave_room');
       _mpMode='solo';_mpRoomCode=null;_myPlayerIdx=0;_remotePlayers=[];_guestInputs={};
+      _playerDead={};_reviveTimer={};
       MODE='landing';playMusic('lobby');
     }
     return;
   }
   if(MODE==='dead'&&deadTimer<=0){
     if(inBtn(BTNS.retry)){_lastTs=performance.now();init();}
-    if(inBtn(BTNS.menu)){resize();MODE='lobby';playMusic('lobby');}
+    if(inBtn(BTNS.menu)){
+      if(_mpMode==='host'&&_socket&&_mpRoomCode) _socket.emit('host_left_game');
+      resize();MODE='lobby';playMusic('lobby');
+    }
   }
   if(_paused){
     if(inBtn(BTNS.pause_continue)){_paused=false;snd('resume');resumeMusic();}
-    if(inBtn(BTNS.pause_quit)){_paused=false;stopMusic();resize();MODE='lobby';playMusic('lobby');}
+    if(inBtn(BTNS.pause_quit)){
+      _paused=false;
+      if(_mpMode==='host'&&_socket&&_mpRoomCode) _socket.emit('host_left_game');
+      stopMusic();resize();MODE='lobby';playMusic('lobby');
+    }
   }
 });
 
@@ -3120,11 +3185,13 @@ function mpInit() {
     _mpJoining   = false;
   });
 
-  // ALL players receive this — host emitted it, server broadcasts back to everyone
+  // ALL players receive this — but only GUESTS call init() here.
+  // The host already called init() directly when clicking LAUNCH (no echo race).
   _socket.on('game_start', () => {
-    _mpLastEvent = 'game_start (MODE was '+MODE+')';
-    if (MODE === 'play') return;
-    console.log('[MP] game_start — launching as P' + (_myPlayerIdx+1) + ' mode=' + _mpMode);
+    _mpLastEvent = 'game_start';
+    if (_mpMode !== 'guest') return;   // host started already
+    if (MODE === 'play') return;        // already in a game (double-fire guard)
+    console.log('[MP] game_start received — guest launching');
     _lastTs = performance.now();
     init();
   });
@@ -3133,6 +3200,17 @@ function mpInit() {
   _socket.on('promoted_to_host', () => {
     _mpMode = 'host';
     addCallout('YOU ARE NOW HOST', false, '#ffcc00');
+  });
+
+  // HOST went back to lobby without disconnecting — guests follow
+  _socket.on('host_left_game', () => {
+    if (_mpMode !== 'guest') return;
+    stopMusic();
+    // Reset game state but keep room/lobby info
+    _playerDead = {}; _reviveTimer = {}; _remotePlayers = []; _remoteState = null;
+    MODE = 'lobby';
+    playMusic('lobby');
+    addCallout('HOST RETURNED TO LOBBY', false, '#ff8800');
   });
 
   /* ── In-game sync ──────────────────────────────────── */
@@ -3149,11 +3227,18 @@ function mpInit() {
     _guestInputs[idx] = keys;
   });
 
-  _socket.on('game_over', () => {
-    // Guest mirrors host game over
-    if (_mpMode === 'guest' && MODE === 'play') {
-      MODE = 'dead'; deadTimer = DEAD_DELAY; deadAge = 0;
+  _socket.on('game_over', (data) => {
+    if (_mpMode !== 'guest') return;
+    // Sync final stats from host before showing dead screen
+    if (data) {
+      if (data.pts !== undefined) points = data.pts;
+      if (data.st  !== undefined) survivalTime = data.st;
+      if (data.ph  !== undefined) phase = data.ph;
     }
+    if (survivalTime > BEST) BEST = survivalTime;
+    stopMusic();
+    deadTimer = DEAD_DELAY; deadAge = 0;
+    MODE = 'dead';
   });
 }
 
@@ -3351,15 +3436,17 @@ function mpTick(ts) {
     }
   }
   if (_mpMode === 'guest') {
+    // Send inputs whenever we're in an active game session:
+    // - MODE='play' (normal play or downed-but-waiting-for-revive)
+    // This allows the host to track our position for revival proximity.
     if (MODE === 'play') {
-      // Send keys every frame for responsive input
       _socket.emit('player_input', {
         ArrowLeft:  !!KEYS['ArrowLeft'],  ArrowRight: !!KEYS['ArrowRight'],
         ArrowUp:    !!KEYS['ArrowUp'],    ArrowDown:  !!KEYS['ArrowDown'],
         a: !!KEYS['a'], d: !!KEYS['d'], w: !!KEYS['w'], s: !!KEYS['s'],
       });
     }
-    // Apply received state regardless of current mode
+    // Apply received state regardless of current mode (handles downed overlay)
     if (_remoteState) { _mpApplyRemoteState(_remoteState); _remoteState = null; }
   }
 }
@@ -3511,10 +3598,12 @@ function loop(ts){
   stepShake(dt);
   stepFlicker(dt);
   // HOST runs full game simulation; GUEST skips gameUpdate (state comes from host)
+  // Note: if host is downed in MP, gameUpdate still runs — it just skips host movement/orbs.
+  // The game must continue so surviving partners can keep playing.
   if(MODE==='play'&&!_paused){
     if(_mpMode !== 'guest') {
       gameUpdate(dt,ts);
-      _mpUpdateGuestPlayers(dt); // HOST: move remote players and handle revival
+      _mpUpdateGuestPlayers(dt); // HOST: move remote players, handle revival
     }
     stepParts(dt);
     stepMatrixFX(dt);
@@ -3522,12 +3611,7 @@ function loop(ts){
   } else if(MODE==='play'&&_paused){
     stepParts(dt*0.1);stepMatrixFX(dt*0.1);
   }
-  // Keep arena alive even when local player is dead (MP only) so partner can revive
-  if(MODE==='dead'&&_mpMode!=='solo'){
-    stepParts(dt);stepMatrixFX(dt);
-    if(deadTimer>0)deadTimer=Math.max(0,deadTimer-dt);
-    deadAge+=dt;
-  } else if(MODE==='dead'){
+  if(MODE==='dead'){
     stepParts(dt);stepMatrixFX(dt);
     if(deadTimer>0)deadTimer=Math.max(0,deadTimer-dt);
     deadAge+=dt;

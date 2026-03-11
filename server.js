@@ -22,7 +22,7 @@ const io     = new Server(server, {
 
 // Serve static files (index.html, assets) from same directory
 app.use(express.static(path.join(__dirname, 'public')));
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+app.get('/', (req, res) => res.sendFile(path.join(__dirname,'public', 'index.html')));
 
 /* ──────────────────────────────────────────────
    ROOM STATE
@@ -129,43 +129,72 @@ io.on('connection', (socket) => {
     io.to(room.host).emit('guest_input', { idx: me.idx, keys });
   });
 
-  /* ── GAME OVER relay ─────────────────────── */
+  /* ── GAME OVER relay (host → guests) ────── */
+  // Host emits this when all players are dead.
   socket.on('game_over', (data) => {
     const room = rooms.get(socket._roomCode);
     if (!room || room.host !== socket.id) return;
     socket.to(room.code).emit('game_over', data);
   });
 
+  /* ── HOST LEFT GAME (returned to lobby) ─── */
+  // Host went back to the lobby screen mid-session (did NOT disconnect).
+  // Guests receive this and return to lobby too. Room stays alive.
+  socket.on('host_left_game', () => {
+    const room = rooms.get(socket._roomCode);
+    if (!room || room.host !== socket.id) return;
+    socket.to(room.code).emit('host_left_game');
+    console.log(`[room] Host returned to lobby in ${room.code}`);
+  });
+
+  /* ── EXPLICIT LEAVE ROOM ─────────────────── */
+  // Player voluntarily leaves the room (BACK button etc.) without disconnecting.
+  socket.on('leave_room', () => {
+    const code = socket._roomCode;
+    if (!code) return;
+    console.log(`[-] ${socket.id} left room ${code} voluntarily`);
+    _handlePlayerLeave(socket);
+  });
+
   /* ── DISCONNECT ──────────────────────────── */
   socket.on('disconnect', () => {
     console.log(`[-] ${socket.id} disconnected`);
-    const code = socket._roomCode;
-    const room = rooms.get(code);
-    if (!room) return;
-
-    room.players.delete(socket.id);
-
-    if (room.players.size === 0) {
-      rooms.delete(code);
-      console.log(`[room] Deleted empty room ${code}`);
-      return;
-    }
-
-    // If host left, promote next player to host
-    if (room.host === socket.id) {
-      room.host = room.players.keys().next().value;
-      io.to(room.host).emit('promoted_to_host');
-      console.log(`[room] New host in ${code}: ${room.host}`);
-    }
-
-    // ► ALL IN ROOM: updated lobby
-    io.to(code).emit('lobby_update', { lobby: lobbySnapshot(room) });
+    _handlePlayerLeave(socket);
   });
 });
 
 /* ──────────────────────────────────────────────
    HELPERS
 ────────────────────────────────────────────── */
+
+/**
+ * Remove a player from their room. Called on disconnect AND on explicit leave_room.
+ * Promotes a new host if needed, notifies remaining players, deletes empty rooms.
+ */
+function _handlePlayerLeave(socket) {
+  const code = socket._roomCode;
+  const room = rooms.get(code);
+  if (!room) return;
+
+  room.players.delete(socket.id);
+  socket.leave(code);
+  socket._roomCode = null;
+
+  if (room.players.size === 0) {
+    rooms.delete(code);
+    console.log(`[room] Deleted empty room ${code}`);
+    return;
+  }
+
+  // Promote next player if host left
+  if (room.host === socket.id) {
+    room.host = room.players.keys().next().value;
+    io.to(room.host).emit('promoted_to_host');
+    console.log(`[room] New host in ${code}: ${room.host}`);
+  }
+
+  io.to(code).emit('lobby_update', { lobby: lobbySnapshot(room) });
+}
 function lobbySnapshot(room) {
   // Returns an array of {idx, name, color} for the lobby display
   const arr = Array.from(room.players.values())
@@ -186,5 +215,5 @@ function nextFreeIdx(room) {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`VOID LOOP server running on http://localhost:${PORT}`);
-  console.log('Place index.html in /public and run: node server.js');
+  console.log('Place index.html in the same directory and run: node server.js');
 });
