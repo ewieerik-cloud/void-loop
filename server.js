@@ -21,8 +21,9 @@ const io     = new Server(server, {
 });
 
 // Serve static files (index.html, assets) from same directory
-app.use(express.static(path.join(__dirname, 'public')));
-app.get('/', (req, res) => res.sendFile(path.join(__dirname,'public', 'index.html')));
+app.use(express.static(path.join(__dirname)));
+// Serve index.html for all GET requests (handles invite links like /?join=CODE)
+app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 
 /* ──────────────────────────────────────────────
    ROOM STATE

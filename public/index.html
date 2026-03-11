@@ -1828,7 +1828,7 @@ function init(){
       _remotePlayers[idx]={idx,x:AX+AS/2,y:AY+AS/2,vx:0,vy:0,trail:[],
         name:pInfo.name||'P'+(idx+1),color:pInfo.color||PLAYER_COLORS[idx%PLAYER_COLORS.length],dead:false,rv:0};
     }
-  }_guestEnemies={};
+  }
   spawnEnemyTop();spawnGroup();
   resetOrbSounds();
   playMusic('normal');
@@ -3047,9 +3047,13 @@ C.addEventListener('click',e=>{
       _lobbyId=Math.random().toString(36).slice(2,8).toUpperCase();
       // If player arrived via invite link, auto-join that room
       if(window._pendingJoinCode && _socket){
-        _mpJoinInput=window._pendingJoinCode; window._pendingJoinCode=null;
+        const code=window._pendingJoinCode.toUpperCase();
+        window._pendingJoinCode=null;
+        _mpJoinInput=code;
+        // Set state optimistically — room_joined will correct _myPlayerIdx and lobby data
+        _mpMode='guest'; _mpRoomCode=code; _myPlayerIdx=1;
         _mpJoining=true; _mpJoinError='';
-        _socket.emit('join_room',{roomCode:_mpJoinInput,name,color:UI.color||PLAYER_COLORS[0]});
+        _socket.emit('join_room',{roomCode:code,name,color:UI.color||PLAYER_COLORS[1]||PLAYER_COLORS[0]});
       }
       resize();MODE='lobby';playMusic('lobby');
     }
@@ -3073,10 +3077,11 @@ C.addEventListener('click',e=>{
     if(inBtn(BTNS.mp_join_btn)&&_socket&&_mpJoinInput.length>=4){
       _mpJoining=true; _mpJoinError='';
       const name=(LOBBY[0]?.name||'PILOT');
-      // Use the player's chosen color, but NOT the same default as host (use index-1 color)
-      const color=(LOBBY[0]?.color&&LOBBY[0].color!==PLAYER_COLORS[0])
-                    ? LOBBY[0].color : PLAYER_COLORS[1];
-      _socket.emit('join_room',{roomCode:_mpJoinInput.toUpperCase(),name,color});
+      const color=(LOBBY[0]?.color&&LOBBY[0].color!==PLAYER_COLORS[0]) ? LOBBY[0].color : PLAYER_COLORS[1];
+      const code=_mpJoinInput.toUpperCase();
+      // Set optimistically so game_start can't race against room_joined
+      _mpMode='guest'; _mpRoomCode=code; _myPlayerIdx=1;
+      _socket.emit('join_room',{roomCode:code,name,color});
     }
     // LAUNCH — host calls init() immediately (no echo race), guests receive game_start
     if(inBtn(BTNS.launch)){
@@ -3209,15 +3214,17 @@ function mpInit() {
   _socket.on('room_error', (msg) => {
     _mpJoinError = msg;
     _mpJoining   = false;
+    // Roll back optimistic state
+    _mpMode = 'solo'; _mpRoomCode = null; _myPlayerIdx = 0;
   });
 
-  // ALL players receive this — but only GUESTS call init() here.
-  // The host already called init() directly when clicking LAUNCH (no echo race).
+  // ALL players receive game_start — host ignores it (already called init()), guests launch.
   _socket.on('game_start', () => {
-    _mpLastEvent = 'game_start';
-    if (_mpMode !== 'guest') return;   // host started already
-    if (MODE === 'play') return;        // already in a game (double-fire guard)
-    console.log('[MP] game_start received — guest launching');
+    if (_mpMode === 'host') return;   // host already started
+    if (MODE === 'play') return;       // already in a game
+    if (!_mpRoomCode) return;          // not in any room — ignore
+    // We're in a room and not the host: start the game
+    _mpMode = 'guest';                 // ensure mode is set even if room_joined was slow
     _lastTs = performance.now();
     init();
   });
