@@ -3708,8 +3708,17 @@ function loop(ts){
         const pf=Math.exp(-CFG.P_DAMP*dt); player.vx*=pf; player.vy*=pf;
         const ps=Math.sqrt(player.vx**2+player.vy**2);
         if(ps>CFG.P_MAX_SPEED){player.vx=player.vx/ps*CFG.P_MAX_SPEED;player.vy=player.vy/ps*CFG.P_MAX_SPEED;}
-        player.x=Math.max(AX+CFG.P_RADIUS,Math.min(AX+AS-CFG.P_RADIUS,player.x+player.vx*dt));
-        player.y=Math.max(AY+CFG.P_RADIUS,Math.min(AY+AS-CFG.P_RADIUS,player.y+player.vy*dt));
+        player.x+=player.vx*dt; player.y+=player.vy*dt;
+        // Wrap walls — must match host physics exactly
+        if(CFG.WRAP_WALLS){
+          if(player.x-CFG.P_RADIUS<AX){player.x=AX+AS-CFG.P_RADIUS;}
+          if(player.x+CFG.P_RADIUS>AX+AS){player.x=AX+CFG.P_RADIUS;}
+          if(player.y-CFG.P_RADIUS<AY){player.y=AY+AS-CFG.P_RADIUS;}
+          if(player.y+CFG.P_RADIUS>AY+AS){player.y=AY+CFG.P_RADIUS;}
+        }else{
+          player.x=Math.max(AX+CFG.P_RADIUS,Math.min(AX+AS-CFG.P_RADIUS,player.x));
+          player.y=Math.max(AY+CFG.P_RADIUS,Math.min(AY+AS-CFG.P_RADIUS,player.y));
+        }
         // Trail
         if(!player.trail)player.trail=[];
         player.trail.push({x:player.x,y:player.y,ts});
