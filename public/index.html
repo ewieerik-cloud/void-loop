@@ -1817,8 +1817,18 @@ function init(){
   matrixPortal=null;_portalAngle=0;portalTransition=null;diedInMatrix=false;slashPhase=null;shooterPhase=null;manPhase=null;
   darkPhase=null;recursionPhase=null;miniBossActive=null;bossPhaseIndex=0;_bossPortal=null;_paused=false;_wallWarp=[];
   orbStreak=0;
-  // Reset remote player positions and revival state (keep lobby/room info intact)
-  _remotePlayers=[];_guestInputs={};_playerDead={};_reviveTimer={};_guestEnemies={};
+  // Reset per-game state — but KEEP room/party info (_guestInputs, _mpMode, LOBBY etc.)
+  // so the host knows who's in the session and guests are recognized immediately.
+  _remotePlayers=[];_playerDead={};_reviveTimer={};_guestEnemies={};
+  // Pre-populate _remotePlayers from LOBBY so they exist before first input arrives
+  if(_mpMode==='host'){
+    for(const idxStr in _guestInputs){
+      const idx=+idxStr;
+      const pInfo=LOBBY[idx]||{};
+      _remotePlayers[idx]={idx,x:AX+AS/2,y:AY+AS/2,vx:0,vy:0,trail:[],
+        name:pInfo.name||'P'+(idx+1),color:pInfo.color||PLAYER_COLORS[idx%PLAYER_COLORS.length],dead:false,rv:0};
+    }
+  }_guestEnemies={};
   spawnEnemyTop();spawnGroup();
   resetOrbSounds();
   playMusic('normal');
