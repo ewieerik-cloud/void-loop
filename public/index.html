@@ -2899,16 +2899,27 @@ function drawDead(ts){
   if(da6>0){
     X.globalAlpha=da6;const waiting=deadTimer>0;
     const bw=210,bh=52,gap=14,bby=cy+168;
-    BTNS.retry=waiting?null:{x:cx-bw-gap,y:bby,w:bw,h:bh};
-    BTNS.menu={x:cx+gap,y:bby,w:bw,h:bh};
-    const h1=!waiting&&inBtn(BTNS.retry),h2=inBtn(BTNS.menu);
-    X.font=`bold 11px ${FM}`;X.textBaseline='middle';
-    X.strokeStyle=waiting?'#2a2a2a':h1?'#ff5500':'#cc1100';X.lineWidth=2;X.shadowColor='#ff2200';X.shadowBlur=waiting?0:h1?30:12;
-    X.strokeRect(cx-bw-gap,bby,bw,bh);if(h1){X.fillStyle='rgba(180,0,0,0.12)';X.fillRect(cx-bw-gap,bby,bw,bh);}
-    X.fillStyle=waiting?'#2a2a2a':h1?'#ff6633':'#ff2200';X.shadowBlur=0;X.fillText('RETRY',cx-bw/2-gap,bby+bh/2);
-    X.strokeStyle=h2?'#888':'#444';X.lineWidth=2;X.strokeRect(cx+gap,bby,bw,bh);
-    if(h2){X.fillStyle='rgba(80,80,80,0.08)';X.fillRect(cx+gap,bby,bw,bh);}
-    X.fillStyle=h2?'#cccccc':'#666';X.fillText('MENU',cx+gap+bw/2,bby+bh/2);
+    const isGuest=_mpMode==='guest';
+    // Guests can't control retry — host does
+    BTNS.retry=waiting||isGuest?null:{x:cx-bw-gap,y:bby,w:bw,h:bh};
+    BTNS.menu=isGuest?null:{x:cx+gap,y:bby,w:bw,h:bh};
+    if(isGuest){
+      // Guest sees "waiting for host" message
+      X.font=`bold 13px ${FM}`;X.textBaseline='middle';X.textAlign='center';
+      X.fillStyle='#446622';X.shadowColor='#88ff44';X.shadowBlur=12;
+      X.fillText('WAITING FOR HOST\u2026',cx,bby+bh/2);X.shadowBlur=0;
+    } else {
+      const h1=!waiting&&inBtn(BTNS.retry),h2=inBtn(BTNS.menu);
+      X.font=`bold 11px ${FM}`;X.textBaseline='middle';
+      X.strokeStyle=waiting?'#2a2a2a':h1?'#ff5500':'#cc1100';X.lineWidth=2;X.shadowColor='#ff2200';X.shadowBlur=waiting?0:h1?30:12;
+      X.strokeRect(cx-bw-gap,bby,bw,bh);if(h1){X.fillStyle='rgba(180,0,0,0.12)';X.fillRect(cx-bw-gap,bby,bw,bh);}
+      const retryLabel=_mpRoomCode?'PLAY AGAIN (ALL)':'RETRY';
+      X.fillStyle=waiting?'#2a2a2a':h1?'#ff6633':'#ff2200';X.shadowBlur=0;X.fillText(retryLabel,cx-bw/2-gap,bby+bh/2);
+      X.strokeStyle=h2?'#888':'#444';X.lineWidth=2;X.strokeRect(cx+gap,bby,bw,bh);
+      if(h2){X.fillStyle='rgba(80,80,80,0.08)';X.fillRect(cx+gap,bby,bw,bh);}
+      const menuLabel=_mpRoomCode?'BACK TO LOBBY':'MENU';
+      X.fillStyle=h2?'#cccccc':'#666';X.fillText(menuLabel,cx+gap+bw/2,bby+bh/2);
+    }
     X.globalAlpha=1;
   }else{BTNS.retry=null;BTNS.menu=null;}
   // Countdown
@@ -3033,6 +3044,13 @@ C.addEventListener('click',e=>{
     UI.focus=null;
     if(inBtn(BTNS.land_play)){
       const name=(UI.name.trim()||'PILOT').slice(0,18).toUpperCase();
+      // Already in a room (returned from landing) — go straight back to lobby
+      if(_mpRoomCode){
+        // Update our name/color in lobby display
+        LOBBY[_myPlayerIdx]={name,color:UI.color||PLAYER_COLORS[_myPlayerIdx]||PLAYER_COLORS[0]};
+        resize();MODE='lobby';playMusic('lobby');
+        return;
+      }
       LOBBY=[{name,color:UI.color||PLAYER_COLORS[0]}];
       _lobbyId=Math.random().toString(36).slice(2,8).toUpperCase();
       // If player arrived via invite link, auto-join that room
@@ -3080,16 +3098,31 @@ C.addEventListener('click',e=>{
       }
     }
     if(inBtn(BTNS.lobby_back)){
-      // Tell server we're leaving the room (before clearing local state)
-      if(_socket&&_mpRoomCode) _socket.emit('leave_room');
-      _mpMode='solo';_mpRoomCode=null;_myPlayerIdx=0;_remotePlayers=[];_guestInputs={};
-      _playerDead={};_reviveTimer={};
-      MODE='landing';playMusic('lobby');
+      if(_mpRoomCode){
+        // In a room — just go to landing but KEEP the room/socket alive.
+        // PLAY on landing will bring them straight back to lobby.
+        MODE='landing'; playMusic('lobby');
+      } else {
+        // Solo — full reset
+        _mpMode='solo';_mpRoomCode=null;_myPlayerIdx=0;_remotePlayers=[];_guestInputs={};
+        _playerDead={};_reviveTimer={};
+        MODE='landing'; playMusic('lobby');
+      }
     }
     return;
   }
   if(MODE==='dead'&&deadTimer<=0){
-    if(inBtn(BTNS.retry)){_lastTs=performance.now();init();}
+    if(inBtn(BTNS.retry)){
+      _lastTs=performance.now();
+      if(_mpMode==='host'&&_socket&&_mpRoomCode){
+        init();
+        _socket.emit('party_retry'); // tell guests to restart too
+      } else if(_mpMode==='guest'){
+        // guests wait — host controls group restart
+      } else {
+        init();
+      }
+    }
     if(inBtn(BTNS.menu)){
       if(_mpMode==='host'&&_socket&&_mpRoomCode) _socket.emit('host_left_game');
       resize();MODE='lobby';playMusic('lobby');
@@ -3206,11 +3239,17 @@ function mpInit() {
   _socket.on('host_left_game', () => {
     if (_mpMode !== 'guest') return;
     stopMusic();
-    // Reset game state but keep room/lobby info
     _playerDead = {}; _reviveTimer = {}; _remotePlayers = []; _remoteState = null;
     MODE = 'lobby';
     playMusic('lobby');
     addCallout('HOST RETURNED TO LOBBY', false, '#ff8800');
+  });
+
+  // HOST clicked retry — all guests restart the game together
+  _socket.on('party_retry', () => {
+    if (_mpMode !== 'guest') return;
+    _lastTs = performance.now();
+    init();
   });
 
   /* ── In-game sync ──────────────────────────────────── */
@@ -3387,11 +3426,22 @@ function _mpApplyRemoteState(s) {
       _playerDead[rp.idx] = !!rp.dead;
       _reviveTimer[rp.idx] = rp.rv || 0;
 
-      // Apply our echoed position back to local player
+      // Guest position reconciliation:
+      // Only hard-snap if the server says we're significantly off (teleport/death/revive).
+      // For normal play, trust local physics to stay close enough.
       if (rp.idx === _myPlayerIdx && player) {
-        const prevX = player.x, prevY = player.y;
-        player.x = rp.x; player.y = rp.y;
-        // Update our own trail
+        const dx = rp.x - player.x, dy = rp.y - player.y;
+        const dist = Math.sqrt(dx*dx+dy*dy);
+        if (dist > 80) {
+          // Large correction (death/revive/wall-warp) — hard snap
+          player.x = rp.x; player.y = rp.y;
+        } else if (dist > 4) {
+          // Small drift — gently nudge toward authoritative position (won't feel laggy)
+          player.x += dx * 0.2;
+          player.y += dy * 0.2;
+        }
+        // else: within 4px, trust local physics completely
+        // Trail
         if (!player.trail) player.trail = [];
         const now = performance.now();
         player.trail.push({ x: player.x, y: player.y, ts: now });
@@ -3430,7 +3480,7 @@ let _mpLastEmit = 0;
 function mpTick(ts) {
   if (!_socket) return;
   if (_mpMode === 'host' && MODE === 'play') {
-    if (ts - _mpLastEmit > 50) {
+    if (ts - _mpLastEmit > 30) {  // ~33Hz — smooth remote player movement
       _socket.emit('game_state', _mpBuildState());
       _mpLastEmit = ts;
     }
@@ -3604,6 +3654,28 @@ function loop(ts){
     if(_mpMode !== 'guest') {
       gameUpdate(dt,ts);
       _mpUpdateGuestPlayers(dt); // HOST: move remote players, handle revival
+    } else {
+      // GUEST: run LOCAL movement physics so controls feel immediate (no lag).
+      // The host's state sync reconciles any drift — gameplay is still host-authoritative.
+      if(player && !_playerDead[_myPlayerIdx]) {
+        let ax=0,ay=0;
+        if(KEYS['ArrowLeft']||KEYS['a']||KEYS['A'])ax-=CFG.P_ACCEL;
+        if(KEYS['ArrowRight']||KEYS['d']||KEYS['D'])ax+=CFG.P_ACCEL;
+        if(KEYS['ArrowUp']||KEYS['w']||KEYS['W'])ay-=CFG.P_ACCEL;
+        if(KEYS['ArrowDown']||KEYS['s']||KEYS['S'])ay+=CFG.P_ACCEL;
+        player.vx=(player.vx||0)+ax*dt; player.vy=(player.vy||0)+ay*dt;
+        const pf=Math.exp(-CFG.P_DAMP*dt); player.vx*=pf; player.vy*=pf;
+        const ps=Math.sqrt(player.vx**2+player.vy**2);
+        if(ps>CFG.P_MAX_SPEED){player.vx=player.vx/ps*CFG.P_MAX_SPEED;player.vy=player.vy/ps*CFG.P_MAX_SPEED;}
+        player.x=Math.max(AX+CFG.P_RADIUS,Math.min(AX+AS-CFG.P_RADIUS,player.x+player.vx*dt));
+        player.y=Math.max(AY+CFG.P_RADIUS,Math.min(AY+AS-CFG.P_RADIUS,player.y+player.vy*dt));
+        // Trail
+        if(!player.trail)player.trail=[];
+        player.trail.push({x:player.x,y:player.y,ts});
+        while(player.trail.length>CFG.TRAIL_MAX_PTS)player.trail.shift();
+        const cutoffG=ts-CFG.TRAIL_DURATION*1000;
+        while(player.trail.length>0&&player.trail[0].ts<cutoffG)player.trail.shift();
+      }
     }
     stepParts(dt);
     stepMatrixFX(dt);

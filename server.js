@@ -137,6 +137,14 @@ io.on('connection', (socket) => {
     socket.to(room.code).emit('game_over', data);
   });
 
+  /* ── PARTY RETRY (host → all) ───────────── */
+  // Host clicked retry — broadcast so all guests restart together.
+  socket.on('party_retry', () => {
+    const room = rooms.get(socket._roomCode);
+    if (!room || room.host !== socket.id) return;
+    io.to(room.code).emit('party_retry');
+  });
+
   /* ── HOST LEFT GAME (returned to lobby) ─── */
   // Host went back to the lobby screen mid-session (did NOT disconnect).
   // Guests receive this and return to lobby too. Room stays alive.
