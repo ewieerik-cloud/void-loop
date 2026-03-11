@@ -1829,7 +1829,8 @@ function init(){
         name:pInfo.name||'P'+(idx+1),color:pInfo.color||PLAYER_COLORS[idx%PLAYER_COLORS.length],dead:false,rv:0};
     }
   }
-  spawnEnemyTop();spawnGroup();
+  // Guests receive enemies/orbs from host state — skip local spawning
+  if(_mpMode!=='guest'){spawnEnemyTop();spawnGroup();}
   resetOrbSounds();
   playMusic('normal');
 }
