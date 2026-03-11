@@ -1819,7 +1819,7 @@ function init(){
   orbStreak=0;
   // Reset per-game state — but KEEP room/party info (_guestInputs, _mpMode, LOBBY etc.)
   // so the host knows who's in the session and guests are recognized immediately.
-  _remotePlayers=[];_playerDead={};_reviveTimer={};_guestEnemies={};
+  _remotePlayers=[];_playerDead={};_reviveTimer={};
   // Pre-populate _remotePlayers from LOBBY so they exist before first input arrives
   if(_mpMode==='host'){
     for(const idxStr in _guestInputs){
@@ -2050,14 +2050,30 @@ function gameUpdate(dt,ts){
   // Enemies
   const frz=effect?.type==='freeze',slw=effect?.type==='slowed',fear=effect?.type==='fear',dim=effect?.type==='dimshift';
   const freezeAll=frz; // only freeze powerup freezes enemies, NOT matrix pills
+  // Build list of all alive player positions for enemy targeting
+  const _alivePlayers=[];
+  if(!_playerDead[0]&&player)_alivePlayers.push({x:player.x,y:player.y,idx:0,isHost:true});
+  if(_mpMode==='host'){
+    for(const idxStr in _guestInputs){
+      const ridx=+idxStr,gp=_remotePlayers[ridx];
+      if(gp&&!_playerDead[ridx])_alivePlayers.push({x:gp.x,y:gp.y,idx:ridx,isHost:false});
+    }
+  }
+  // Helper: find closest alive player to a point
+  function _closestPlayer(ex,ey){
+    if(_alivePlayers.length===0)return{x:player.x,y:player.y};
+    let best=_alivePlayers[0],bd=dst(ex,ey,best.x,best.y);
+    for(let pi=1;pi<_alivePlayers.length;pi++){const ap=_alivePlayers[pi];const d2=dst(ex,ey,ap.x,ap.y);if(d2<bd){bd=d2;best=ap;}}
+    return best;
+  }
   for(let i=enemies.length-1;i>=0;i--){
     const e=enemies[i];
     e.spawnAge=(e.spawnAge||0)+dt; // track age for spawn blink/safe window
     if(freezeAll){e.vx*=0.85;e.vy*=0.85;continue;}
     let sm=slw?CFG.SLOW_FACTOR:1;if(e.slowT>0){e.slowT-=dt;sm=Math.min(sm,0.2);}
     if(dim){if(!e.dimDir){const a=rnd(0,PI2);e.dimDir={x:Math.cos(a),y:Math.sin(a)};}e.vx+=e.dimDir.x*CFG.E_ACCEL*dt;e.vy+=e.dimDir.y*CFG.E_ACCEL*dt;}
-    else if(fear){const dx=e.x-player.x,dy=e.y-player.y,d=Math.sqrt(dx*dx+dy*dy)||1;e.vx+=dx/d*CFG.E_ACCEL*dt;e.vy+=dy/d*CFG.E_ACCEL*dt;}
-    else{e.rtimer-=dt;if(e.rtimer<=0){e.rtimer=e.rt;const dx=player.x-e.x,dy=player.y-e.y,d=Math.sqrt(dx*dx+dy*dy)||1;e.ddx=dx/d;e.ddy=dy/d;}e.vx+=e.ddx*CFG.E_ACCEL*sm*dt;e.vy+=e.ddy*CFG.E_ACCEL*sm*dt;}
+    else if(fear){const cp=_closestPlayer(e.x,e.y);const dx=e.x-cp.x,dy=e.y-cp.y,d=Math.sqrt(dx*dx+dy*dy)||1;e.vx+=dx/d*CFG.E_ACCEL*dt;e.vy+=dy/d*CFG.E_ACCEL*dt;}
+    else{e.rtimer-=dt;if(e.rtimer<=0){e.rtimer=e.rt;const cp=_closestPlayer(e.x,e.y);const dx=cp.x-e.x,dy=cp.y-e.y,d=Math.sqrt(dx*dx+dy*dy)||1;e.ddx=dx/d;e.ddy=dy/d;}e.vx+=e.ddx*CFG.E_ACCEL*sm*dt;e.vy+=e.ddy*CFG.E_ACCEL*sm*dt;}
     const ef=Math.exp(-CFG.E_DAMP*dt);e.vx*=ef;e.vy*=ef;
     const es=Math.sqrt(e.vx**2+e.vy**2),em=dim?CFG.P_MAX_SPEED*0.7:e.spd*sm;
     if(es>em&&es>0){e.vx=e.vx/es*em;e.vy=e.vy/es*em;}
@@ -2070,7 +2086,7 @@ function gameUpdate(dt,ts){
     if(fear&&wh){points+=CFG.SCORE_PER_KILL;addFloatText('+'+CFG.SCORE_PER_KILL,e.x,e.y,'#ff44ff');FX_ENEMY_DEATH(e.x,e.y);snd('enemy_death');enemies.splice(i,1);}
   }
 
-  // Enemy collision with player
+  // Enemy collision with ALL players (host + guests)
   if(!matrixState){
     const _inv=isInvincible();
     const _dim=effect?.type==='dimshift';
@@ -2078,9 +2094,19 @@ function gameUpdate(dt,ts){
     if(_dim){
       for(let i=enemies.length-1;i>=0;i--)if((enemies[i].spawnAge||0)>=1.5&&dst(player.x,player.y,enemies[i].x,enemies[i].y)<CFG.P_RADIUS+CFG.E_RADIUS){points+=CFG.SCORE_PER_KILL;addFloatText('+'+CFG.SCORE_PER_KILL,enemies[i].x,enemies[i].y,'#dd44ff');FX_ENEMY_DEATH(enemies[i].x,enemies[i].y);snd('enemy_death');enemies.splice(i,1);}
     } else if(!_inv&&!_bomb&&_redPillSafeFrames<=0){
-      for(const e of enemies)if((e.spawnAge||0)>=1.5&&dst(player.x,player.y,e.x,e.y)<CFG.P_RADIUS+CFG.E_RADIUS){killPlayer();return;}
+      for(const e of enemies){
+        if((e.spawnAge||0)<1.5)continue;
+        // Check host player
+        if(!_playerDead[0]&&dst(player.x,player.y,e.x,e.y)<CFG.P_RADIUS+CFG.E_RADIUS){killPlayer();return;}
+        // Check all guests
+        if(_mpMode==='host'){
+          for(const idxStr in _guestInputs){
+            const ridx=+idxStr,gp=_remotePlayers[ridx];
+            if(gp&&!_playerDead[ridx]&&dst(gp.x,gp.y,e.x,e.y)<CFG.P_RADIUS+CFG.E_RADIUS){_killGuestPlayer(ridx);break;}
+          }
+        }
+      }
     }
-    // Guest enemy collisions are handled in _mpUpdateGuestPlayers via _guestEnemies
   }
   if(_redPillSafeFrames>0)_redPillSafeFrames--;
   if(MODE!=='play')return;
@@ -3298,11 +3324,6 @@ function _mpBuildState() {
                     dead:!!_playerDead[rp.idx], rv:_reviveTimer[rp.idx]||0 });
     }
   }
-  // Per-guest enemy sets keyed by guest index string
-  const ge = {};
-  for (const idxStr in _guestEnemies) {
-    ge[idxStr] = _guestEnemies[idxStr].map(e=>({x:e.x,y:e.y,sa:e.spawnAge||0}));
-  }
   // Float texts (last 8) and callouts (last 4) so guest sees feedback
   const po = (popups||[]).slice(-8).map(p=>({txt:p.txt,x:p.x,y:p.y,col:p.col,t:p.t,mt:p.maxT,vy:p.vy||0}));
   const ca = (callouts||[]).filter(c=>c.t>0).slice(-4).map(c=>({txt:c.txt,t:c.t,col:c.col,drama:!!c.drama}));
@@ -3312,7 +3333,6 @@ function _mpBuildState() {
     p0rv: _reviveTimer[0]||0,
     rp:  rpList,
     e:   enemies.map(e=>({x:e.x,y:e.y,sa:e.spawnAge||0})),
-    ge,
     c:   colls.map(c=>({x:c.x,y:c.y,d:c.done,r:c.r||CFG.C_RADIUS})),
     g:   grp    ? {t:grp.timer,m:grp.maxT,n:grp.n} : null,
     pu:  pickup ? {x:pickup.x,y:pickup.y,tp:pickup.type,l:pickup.life} : null,
@@ -3320,22 +3340,6 @@ function _mpBuildState() {
     po, ca,
     ef:  effect ? {type:effect.type,t:effect.t,maxT:effect.maxT} : null,
   };
-}
-
-// Per-guest enemy sets — each guest gets their own enemies targeting them
-let _guestEnemies = {};
-
-function _mpSpawnGuestEnemy(guestIdx) {
-  if (!_guestEnemies[guestIdx]) _guestEnemies[guestIdx] = [];
-  const m = CFG.E_RADIUS + 20;
-  const x = AX + m + Math.random() * (AS - m*2);
-  const y = AY + m + Math.random() * AS * 0.25;
-  _guestEnemies[guestIdx].push({
-    x, y, vx:0, vy:0,
-    spd: CFG.P_MAX_SPEED * rnd(CFG.E_SPEED_MIN, CFG.E_SPEED_MAX),
-    rt: rnd(CFG.E_REACT_MIN, CFG.E_REACT_MAX), rtimer: rnd(0, 0.18),
-    ddx:0, ddy:1, slowT:0, dimDir:null, spawnAge:0,
-  });
 }
 
 /** HOST: update guest state from received position, run guest enemies, handle revival */
@@ -3377,35 +3381,7 @@ function _mpUpdateGuestPlayers(dt) {
       while (gp.trail.length > 0 && gp.trail[0].ts < cutoff) gp.trail.shift();
     }
 
-    // ── Guest-specific enemies ────────────────────────────────
-    if (!_guestEnemies[idx]) _guestEnemies[idx] = [];
-    const ge = _guestEnemies[idx];
-    const targetCount = enemies.length || 1; // mirror host enemy count
-    while (ge.length < targetCount) _mpSpawnGuestEnemy(idx);
-
-    if (!_playerDead[idx]) {
-      for (let i = ge.length - 1; i >= 0; i--) {
-        const e = ge[i];
-        e.spawnAge = (e.spawnAge||0) + dt;
-        e.rtimer -= dt;
-        if (e.rtimer <= 0) {
-          e.rtimer = e.rt;
-          const dx = gp.x - e.x, dy = gp.y - e.y, d = Math.sqrt(dx*dx+dy*dy)||1;
-          e.ddx = dx/d; e.ddy = dy/d;
-        }
-        e.vx += e.ddx * CFG.E_ACCEL * dt; e.vy += e.ddy * CFG.E_ACCEL * dt;
-        const ef = Math.exp(-CFG.E_DAMP*dt); e.vx *= ef; e.vy *= ef;
-        const es = Math.sqrt(e.vx**2+e.vy**2);
-        if (es > e.spd && es > 0) { e.vx = e.vx/es*e.spd; e.vy = e.vy/es*e.spd; }
-        e.x += e.vx*dt; e.y += e.vy*dt;
-        e.x = Math.max(AX+CFG.E_RADIUS, Math.min(AX+AS-CFG.E_RADIUS, e.x));
-        e.y = Math.max(AY+CFG.E_RADIUS, Math.min(AY+AS-CFG.E_RADIUS, e.y));
-        // Collision
-        if ((e.spawnAge||0) >= 1.5 && dst(gp.x, gp.y, e.x, e.y) < CFG.P_RADIUS + CFG.E_RADIUS) {
-          _killGuestPlayer(idx); break;
-        }
-      }
-    }
+    // Guest-enemy collisions are now handled in gameUpdate via the shared enemies array
   }
 
   // ── REVIVAL LOGIC ──────────────────────────────────────────
@@ -3437,12 +3413,9 @@ function _mpUpdateGuestPlayers(dt) {
 function _mpApplyRemoteState(s) {
   if (!s) return;
 
-  // Use THIS guest's own enemy set if available; fall back to host enemies
-  const myGE = s.ge && s.ge[String(_myPlayerIdx)];
-  if (myGE) {
-    enemies = myGE.map(e=>({x:e.x,y:e.y,spawnAge:e.sa,vx:0,vy:0,spd:CFG.P_MAX_SPEED*0.45,rt:0.3,rtimer:0,ddx:0,ddy:-1,slowT:0,dimDir:null}));
-  } else if (s.e) {
-    enemies = s.e.map(e=>({x:e.x,y:e.y,spawnAge:e.sa,vx:0,vy:0,spd:0,rt:0,rtimer:0,ddx:0,ddy:-1,slowT:0,dimDir:null}));
+  // Always use the shared enemy array from host — all players see the same map
+  if (s.e) {
+    enemies = s.e.map(e=>({x:e.x,y:e.y,spawnAge:e.sa,vx:0,vy:0,spd:CFG.P_MAX_SPEED*0.45,rt:0.3,rtimer:0,ddx:0,ddy:-1,slowT:0,dimDir:null}));
   }
 
   if (s.c !== undefined) colls = (s.c||[]).map(c=>({x:c.x,y:c.y,done:c.d,r:c.r||CFG.C_RADIUS}));
