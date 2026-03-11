@@ -2088,17 +2088,15 @@ function gameUpdate(dt,ts){
 
   // Enemy collision with ALL players (host + guests)
   if(!matrixState){
-    const _inv=isInvincible();
     const _dim=effect?.type==='dimshift';
     const _bomb=effect?.type==='bomb';
+    const _hostInv=!!(effect&&(effect.type==='invincible'||effect.type==='bomb'))||!!slashPhase?.cin;
     if(_dim){
       for(let i=enemies.length-1;i>=0;i--)if((enemies[i].spawnAge||0)>=1.5&&dst(player.x,player.y,enemies[i].x,enemies[i].y)<CFG.P_RADIUS+CFG.E_RADIUS){points+=CFG.SCORE_PER_KILL;addFloatText('+'+CFG.SCORE_PER_KILL,enemies[i].x,enemies[i].y,'#dd44ff');FX_ENEMY_DEATH(enemies[i].x,enemies[i].y);snd('enemy_death');enemies.splice(i,1);}
-    } else if(!_inv&&!_bomb&&_redPillSafeFrames<=0){
+    } else if(!_bomb&&_redPillSafeFrames<=0){
       for(const e of enemies){
         if((e.spawnAge||0)<1.5)continue;
-        // Check host player
-        if(!_playerDead[0]&&dst(player.x,player.y,e.x,e.y)<CFG.P_RADIUS+CFG.E_RADIUS){killPlayer();return;}
-        // Check all guests
+        if(!_playerDead[0]&&!_hostInv&&dst(player.x,player.y,e.x,e.y)<CFG.P_RADIUS+CFG.E_RADIUS){killPlayer();return;}
         if(_mpMode==='host'){
           for(const idxStr in _guestInputs){
             const ridx=+idxStr,gp=_remotePlayers[ridx];
@@ -2141,7 +2139,7 @@ function gameUpdate(dt,ts){
       else if(orbStreak>0){orbStreak=0;addCallout('STREAK LOST',false,'#664444');}
       grp=null;colls=[];advancePhase();
     }
-    else{grp.timer-=dt;if(grp.timer<=0){orbStreak=0;killPlayer();return;}}
+    else{grp.timer-=dt;if(grp.timer<=0){orbStreak=0;if(_mpMode==="host"){for(const _oi in _guestInputs){if(!_playerDead[+_oi])_killGuestPlayer(+_oi);}}killPlayer();return;}}
   }
 
   // Pickup life + collection — only host's living player collects pickups
