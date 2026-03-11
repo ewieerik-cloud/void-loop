@@ -1818,7 +1818,7 @@ function init(){
   darkPhase=null;recursionPhase=null;miniBossActive=null;bossPhaseIndex=0;_bossPortal=null;_paused=false;_wallWarp=[];
   orbStreak=0;
   // Reset remote player positions and revival state (keep lobby/room info intact)
-  _remotePlayers=[];_guestInputs={};_playerDead={};_reviveTimer={};
+  _remotePlayers=[];_guestInputs={};_playerDead={};_reviveTimer={};_guestEnemies={};
   spawnEnemyTop();spawnGroup();
   resetOrbSounds();
   playMusic('normal');
@@ -2066,29 +2066,11 @@ function gameUpdate(dt,ts){
     const _dim=effect?.type==='dimshift';
     const _bomb=effect?.type==='bomb';
     if(_dim){
-      // Dimshift: player kills enemies on contact
       for(let i=enemies.length-1;i>=0;i--)if((enemies[i].spawnAge||0)>=1.5&&dst(player.x,player.y,enemies[i].x,enemies[i].y)<CFG.P_RADIUS+CFG.E_RADIUS){points+=CFG.SCORE_PER_KILL;addFloatText('+'+CFG.SCORE_PER_KILL,enemies[i].x,enemies[i].y,'#dd44ff');FX_ENEMY_DEATH(enemies[i].x,enemies[i].y);snd('enemy_death');enemies.splice(i,1);}
     } else if(!_inv&&!_bomb&&_redPillSafeFrames<=0){
-      // Normal: enemies kill player
       for(const e of enemies)if((e.spawnAge||0)>=1.5&&dst(player.x,player.y,e.x,e.y)<CFG.P_RADIUS+CFG.E_RADIUS){killPlayer();return;}
     }
-    // ── Guest enemy collision (host-authoritative) ───────────────────
-    // Host checks each connected guest's position against enemies.
-    // This makes guests full participants — they can die from enemies too.
-    if(_mpMode==='host'){
-      for(const ridxStr in _guestInputs){
-        const ridx=+ridxStr;
-        const gp=_remotePlayers[ridx];
-        if(!gp||_playerDead[ridx])continue; // skip if already downed
-        for(const e of enemies){
-          if((e.spawnAge||0)>=1.5&&dst(gp.x,gp.y,e.x,e.y)<CFG.P_RADIUS+CFG.E_RADIUS){
-            _killGuestPlayer(ridx);
-            break;
-          }
-        }
-        if(MODE!=='play')return; // _killGuestPlayer may have ended game
-      }
-    }
+    // Guest enemy collisions are handled in _mpUpdateGuestPlayers via _guestEnemies
   }
   if(_redPillSafeFrames>0)_redPillSafeFrames--;
   if(MODE!=='play')return;
@@ -3098,12 +3080,11 @@ C.addEventListener('click',e=>{
       }
     }
     if(inBtn(BTNS.lobby_back)){
-      if(_mpRoomCode){
-        // In a room — just go to landing but KEEP the room/socket alive.
-        // PLAY on landing will bring them straight back to lobby.
+      if(_mpMode==='guest'){
+        // Guest can't leave independently — only the host can end/leave the session
+      } else if(_mpRoomCode){
         MODE='landing'; playMusic('lobby');
       } else {
-        // Solo — full reset
         _mpMode='solo';_mpRoomCode=null;_myPlayerIdx=0;_remotePlayers=[];_guestInputs={};
         _playerDead={};_reviveTimer={};
         MODE='landing'; playMusic('lobby');
@@ -3116,14 +3097,15 @@ C.addEventListener('click',e=>{
       _lastTs=performance.now();
       if(_mpMode==='host'&&_socket&&_mpRoomCode){
         init();
-        _socket.emit('party_retry'); // tell guests to restart too
+        _socket.emit('party_retry');
       } else if(_mpMode==='guest'){
-        // guests wait — host controls group restart
+        // guest waits — host controls restart
       } else {
         init();
       }
     }
     if(inBtn(BTNS.menu)){
+      if(_mpMode==='guest') return; // guest can't leave independently
       if(_mpMode==='host'&&_socket&&_mpRoomCode) _socket.emit('host_left_game');
       resize();MODE='lobby';playMusic('lobby');
     }
@@ -3131,6 +3113,7 @@ C.addEventListener('click',e=>{
   if(_paused){
     if(inBtn(BTNS.pause_continue)){_paused=false;snd('resume');resumeMusic();}
     if(inBtn(BTNS.pause_quit)){
+      if(_mpMode==='guest') return; // guest can't leave independently
       _paused=false;
       if(_mpMode==='host'&&_socket&&_mpRoomCode) _socket.emit('host_left_game');
       stopMusic();resize();MODE='lobby';playMusic('lobby');
@@ -3290,189 +3273,227 @@ function _lobbyFromSnapshot(snap) {
 
 /** HOST: build compact state snapshot for broadcast */
 function _mpBuildState() {
-  // Convert sparse _remotePlayers array to compact array for JSON
   const rpList = [];
   for (let i = 0; i < _remotePlayers.length; i++) {
     if (_remotePlayers[i]) {
       const rp = _remotePlayers[i];
-      rpList.push({ idx: rp.idx, x: rp.x, y: rp.y, name: rp.name, color: rp.color,
-                    dead: !!_playerDead[rp.idx], rv: _reviveTimer[rp.idx]||0 });
+      rpList.push({ idx:rp.idx, x:rp.x, y:rp.y, name:rp.name, color:rp.color,
+                    dead:!!_playerDead[rp.idx], rv:_reviveTimer[rp.idx]||0 });
     }
   }
+  // Per-guest enemy sets keyed by guest index string
+  const ge = {};
+  for (const idxStr in _guestEnemies) {
+    ge[idxStr] = _guestEnemies[idxStr].map(e=>({x:e.x,y:e.y,sa:e.spawnAge||0}));
+  }
+  // Float texts (last 8) and callouts (last 4) so guest sees feedback
+  const po = (popups||[]).slice(-8).map(p=>({txt:p.txt,x:p.x,y:p.y,col:p.col,t:p.t,mt:p.maxT,vy:p.vy||0}));
+  const ca = (callouts||[]).filter(c=>c.t>0).slice(-4).map(c=>({txt:c.txt,t:c.t,col:c.col,drama:!!c.drama}));
   return {
-    p:  player ? { x: player.x, y: player.y } : null,
-    p0dead: !!_playerDead[0],  // host dead flag
+    p:   player ? {x:player.x,y:player.y} : null,
+    p0dead: !!_playerDead[0],
     p0rv: _reviveTimer[0]||0,
-    rp: rpList,
-    e:  enemies.map(e => ({ x: e.x, y: e.y, sa: e.spawnAge || 0 })),
-    c:  colls.map(c  => ({ x: c.x, y: c.y, d: c.done, r: c.r || CFG.C_RADIUS })),
-    g:  grp    ? { t: grp.timer, m: grp.maxT, n: grp.n } : null,
-    pu: pickup ? { x: pickup.x, y: pickup.y, tp: pickup.type, l: pickup.life } : null,
+    rp:  rpList,
+    e:   enemies.map(e=>({x:e.x,y:e.y,sa:e.spawnAge||0})),
+    ge,
+    c:   colls.map(c=>({x:c.x,y:c.y,d:c.done,r:c.r||CFG.C_RADIUS})),
+    g:   grp    ? {t:grp.timer,m:grp.maxT,n:grp.n} : null,
+    pu:  pickup ? {x:pickup.x,y:pickup.y,tp:pickup.type,l:pickup.life} : null,
     pts: points, ph: phase, st: survivalTime, sk: orbStreak,
+    po, ca,
+    ef:  effect ? {type:effect.type,t:effect.t,maxT:effect.maxT} : null,
   };
 }
 
-/** HOST: apply guest key inputs to move remote player dots + update trails + revival */
+// Per-guest enemy sets — each guest gets their own enemies targeting them
+let _guestEnemies = {};
+
+function _mpSpawnGuestEnemy(guestIdx) {
+  if (!_guestEnemies[guestIdx]) _guestEnemies[guestIdx] = [];
+  const m = CFG.E_RADIUS + 20;
+  const x = AX + m + Math.random() * (AS - m*2);
+  const y = AY + m + Math.random() * AS * 0.25;
+  _guestEnemies[guestIdx].push({
+    x, y, vx:0, vy:0,
+    spd: CFG.P_MAX_SPEED * rnd(CFG.E_SPEED_MIN, CFG.E_SPEED_MAX),
+    rt: rnd(CFG.E_REACT_MIN, CFG.E_REACT_MAX), rtimer: rnd(0, 0.18),
+    ddx:0, ddy:1, slowT:0, dimDir:null, spawnAge:0,
+  });
+}
+
+/** HOST: update guest state from received position, run guest enemies, handle revival */
 function _mpUpdateGuestPlayers(dt) {
   if (_mpMode !== 'host') return;
+
   for (const idxStr in _guestInputs) {
     const idx = +idxStr;
     if (idx === 0) continue;
+    const input = _guestInputs[idx];
+
     if (!_remotePlayers[idx]) {
-      // Use lobby data — fallback to distinct per-index color so same-name players look different
       const pInfo = LOBBY[idx] || {};
       _remotePlayers[idx] = {
-        idx, x: AX+AS/2, y: AY+AS/2, vx: 0, vy: 0, trail: [],
+        idx, x: AX+AS/2, y: AY+AS/2, vx:0, vy:0, trail:[],
         name:  pInfo.name  || 'P'+(idx+1),
         color: pInfo.color || PLAYER_COLORS[idx % PLAYER_COLORS.length],
+        dead: false, rv: 0,
       };
     }
     const gp = _remotePlayers[idx];
     if (!gp.trail) gp.trail = [];
 
-    // Skip movement physics if this guest is dead
+    // Use position sent by guest — no host-side physics so no divergence/teleporting
+    if (!_playerDead[idx] && input.px !== undefined) {
+      gp.x = input.px; gp.y = input.py;
+    }
+
+    // Keep dead/rv on the object for mpDrawPlayers
+    gp.dead = !!_playerDead[idx];
+    gp.rv   = _reviveTimer[idx] || 0;
+
+    // Update trail
     if (!_playerDead[idx]) {
-      const keys = _guestInputs[idx];
-      let ax = 0, ay = 0;
-      if (keys.ArrowLeft || keys.a) ax -= CFG.P_ACCEL;
-      if (keys.ArrowRight|| keys.d) ax += CFG.P_ACCEL;
-      if (keys.ArrowUp   || keys.w) ay -= CFG.P_ACCEL;
-      if (keys.ArrowDown || keys.s) ay += CFG.P_ACCEL;
-      gp.vx += ax * dt; gp.vy += ay * dt;
-      gp.vx *= Math.exp(-CFG.P_DAMP * dt); gp.vy *= Math.exp(-CFG.P_DAMP * dt);
-      const spd = Math.sqrt(gp.vx**2+gp.vy**2);
-      if (spd > CFG.P_MAX_SPEED) { gp.vx = gp.vx/spd*CFG.P_MAX_SPEED; gp.vy = gp.vy/spd*CFG.P_MAX_SPEED; }
-      gp.x = Math.max(AX+CFG.P_RADIUS, Math.min(AX+AS-CFG.P_RADIUS, gp.x + gp.vx*dt));
-      gp.y = Math.max(AY+CFG.P_RADIUS, Math.min(AY+AS-CFG.P_RADIUS, gp.y + gp.vy*dt));
-      // Trail
       const now = performance.now();
-      gp.trail.push({ x: gp.x, y: gp.y, ts: now });
+      gp.trail.push({x: gp.x, y: gp.y, ts: now});
       const cutoff = now - CFG.TRAIL_DURATION * 1000;
       while (gp.trail.length > CFG.TRAIL_MAX_PTS) gp.trail.shift();
       while (gp.trail.length > 0 && gp.trail[0].ts < cutoff) gp.trail.shift();
     }
-  }
 
-  // ── REVIVAL LOGIC (host-authoritative) ──────────────────────
-  // Check each dead player; if an alive player is nearby, increment revival timer
-  const allPlayerPositions = [
-    // Host player (idx 0)
-    { idx: 0, x: player?.x, y: player?.y, dead: !!_playerDead[0] },
-    // Guests
-    ...Object.keys(_guestInputs).map(i => {
-      const rp = _remotePlayers[+i];
-      return { idx: +i, x: rp?.x, y: rp?.y, dead: !!_playerDead[+i] };
-    }),
-  ];
+    // ── Guest-specific enemies ────────────────────────────────
+    if (!_guestEnemies[idx]) _guestEnemies[idx] = [];
+    const ge = _guestEnemies[idx];
+    const targetCount = enemies.length || 1; // mirror host enemy count
+    while (ge.length < targetCount) _mpSpawnGuestEnemy(idx);
 
-  for (const dp of allPlayerPositions) {
-    if (!dp.dead) continue; // only process dead players
-    if (dp.x === undefined) continue;
-
-    // Is there an alive player within REVIVE_RADIUS?
-    const rescuer = allPlayerPositions.find(ap =>
-      !ap.dead && ap.idx !== dp.idx && ap.x !== undefined &&
-      dst(ap.x, ap.y, dp.x, dp.y) < REVIVE_RADIUS
-    );
-
-    if (rescuer) {
-      _reviveTimer[dp.idx] = (_reviveTimer[dp.idx] || 0) + dt;
-      if (_reviveTimer[dp.idx] >= REVIVE_TIME) {
-        // REVIVED!
-        _playerDead[dp.idx] = false;
-        _reviveTimer[dp.idx] = 0;
-        addCallout('REVIVED!', false, '#44ff88');
-        snd('pickup'); // reuse existing sound
-        // Respawn remote guest at center
-        if (dp.idx !== 0 && _remotePlayers[dp.idx]) {
-          _remotePlayers[dp.idx].x = AX+AS/2; _remotePlayers[dp.idx].y = AY+AS/2;
-          _remotePlayers[dp.idx].vx = 0; _remotePlayers[dp.idx].vy = 0;
+    if (!_playerDead[idx]) {
+      for (let i = ge.length - 1; i >= 0; i--) {
+        const e = ge[i];
+        e.spawnAge = (e.spawnAge||0) + dt;
+        e.rtimer -= dt;
+        if (e.rtimer <= 0) {
+          e.rtimer = e.rt;
+          const dx = gp.x - e.x, dy = gp.y - e.y, d = Math.sqrt(dx*dx+dy*dy)||1;
+          e.ddx = dx/d; e.ddy = dy/d;
         }
-        if (dp.idx === 0) {
-          player.x = AX+AS/2; player.y = AY+AS/2; player.vx = 0; player.vy = 0;
+        e.vx += e.ddx * CFG.E_ACCEL * dt; e.vy += e.ddy * CFG.E_ACCEL * dt;
+        const ef = Math.exp(-CFG.E_DAMP*dt); e.vx *= ef; e.vy *= ef;
+        const es = Math.sqrt(e.vx**2+e.vy**2);
+        if (es > e.spd && es > 0) { e.vx = e.vx/es*e.spd; e.vy = e.vy/es*e.spd; }
+        e.x += e.vx*dt; e.y += e.vy*dt;
+        e.x = Math.max(AX+CFG.E_RADIUS, Math.min(AX+AS-CFG.E_RADIUS, e.x));
+        e.y = Math.max(AY+CFG.E_RADIUS, Math.min(AY+AS-CFG.E_RADIUS, e.y));
+        // Collision
+        if ((e.spawnAge||0) >= 1.5 && dst(gp.x, gp.y, e.x, e.y) < CFG.P_RADIUS + CFG.E_RADIUS) {
+          _killGuestPlayer(idx); break;
         }
       }
-    } else {
-      // No rescuer in range — reset timer
-      _reviveTimer[dp.idx] = 0;
     }
+  }
+
+  // ── REVIVAL LOGIC ──────────────────────────────────────────
+  const allPos = [
+    { idx:0, x:player?.x, y:player?.y, dead:!!_playerDead[0] },
+    ...Object.keys(_guestInputs).map(i => {
+      const rp = _remotePlayers[+i];
+      return { idx:+i, x:rp?.x, y:rp?.y, dead:!!_playerDead[+i] };
+    }),
+  ];
+  for (const dp of allPos) {
+    if (!dp.dead || dp.x === undefined) continue;
+    const rescuer = allPos.find(ap => !ap.dead && ap.idx !== dp.idx && ap.x !== undefined && dst(ap.x, ap.y, dp.x, dp.y) < REVIVE_RADIUS);
+    if (rescuer) {
+      _reviveTimer[dp.idx] = (_reviveTimer[dp.idx]||0) + dt;
+      if (_reviveTimer[dp.idx] >= REVIVE_TIME) {
+        _playerDead[dp.idx] = false; _reviveTimer[dp.idx] = 0;
+        addCallout('REVIVED!', false, '#44ff88'); snd('pickup');
+        if (dp.idx !== 0 && _remotePlayers[dp.idx]) { _remotePlayers[dp.idx].x = AX+AS/2; _remotePlayers[dp.idx].y = AY+AS/2; _remotePlayers[dp.idx].vx=0; _remotePlayers[dp.idx].vy=0; }
+        if (dp.idx === 0) { player.x = AX+AS/2; player.y = AY+AS/2; player.vx=0; player.vy=0; }
+      }
+    } else { _reviveTimer[dp.idx] = 0; }
+    // Keep rv updated on object for draw
+    if (_remotePlayers[dp.idx]) { _remotePlayers[dp.idx].rv = _reviveTimer[dp.idx]||0; _remotePlayers[dp.idx].dead = !!_playerDead[dp.idx]; }
   }
 }
 
-/** GUEST: apply received state to game globals so normal render() works */
+/** GUEST: apply received host state so everything renders correctly */
 function _mpApplyRemoteState(s) {
   if (!s) return;
-  if (s.e) enemies = s.e.map(e => ({ x: e.x, y: e.y, spawnAge: e.sa, vx:0,vy:0,spd:0,rt:0,rtimer:0,ddx:0,ddy:-1,slowT:0,dimDir:null }));
-  if (s.c !== undefined) colls = (s.c||[]).map(c => ({ x: c.x, y: c.y, done: c.d, r: c.r||CFG.C_RADIUS }));
-  grp    = s.g  ? { timer: s.g.t, maxT: s.g.m, n: s.g.n } : null;
-  pickup = s.pu ? { x: s.pu.x, y: s.pu.y, type: s.pu.tp, life: s.pu.l } : null;
+
+  // Use THIS guest's own enemy set if available; fall back to host enemies
+  const myGE = s.ge && s.ge[String(_myPlayerIdx)];
+  if (myGE) {
+    enemies = myGE.map(e=>({x:e.x,y:e.y,spawnAge:e.sa,vx:0,vy:0,spd:CFG.P_MAX_SPEED*0.45,rt:0.3,rtimer:0,ddx:0,ddy:-1,slowT:0,dimDir:null}));
+  } else if (s.e) {
+    enemies = s.e.map(e=>({x:e.x,y:e.y,spawnAge:e.sa,vx:0,vy:0,spd:0,rt:0,rtimer:0,ddx:0,ddy:-1,slowT:0,dimDir:null}));
+  }
+
+  if (s.c !== undefined) colls = (s.c||[]).map(c=>({x:c.x,y:c.y,done:c.d,r:c.r||CFG.C_RADIUS}));
+  grp    = s.g  ? {timer:s.g.t,maxT:s.g.m,n:s.g.n} : null;
+  pickup = s.pu ? {x:s.pu.x,y:s.pu.y,type:s.pu.tp,life:s.pu.l} : null;
   points = s.pts; phase = s.ph; survivalTime = s.st; orbStreak = s.sk;
 
-  // Sync host dead state
-  _playerDead[0] = !!s.p0dead;
-  _reviveTimer[0] = s.p0rv || 0;
+  // Sync active effect so guest sees invincible flash, freeze colour etc.
+  if (s.ef) effect = {type:s.ef.type, t:s.ef.t, maxT:s.ef.maxT};
+  else if (!s.ef) effect = null;
 
-  // rp list has ALL players with name/color/dead/rv from host
-  if (s.rp) {
-    for (const rp of s.rp) {
-      if (!rp) continue;
-      const existing = _remotePlayers[rp.idx] || {};
-      // Preserve local trail array; update everything else from server
-      _remotePlayers[rp.idx] = {
-        ...rp,
-        trail: existing.trail || [],
-        vx: existing.vx || 0, vy: existing.vy || 0,
-      };
-      _playerDead[rp.idx] = !!rp.dead;
-      _reviveTimer[rp.idx] = rp.rv || 0;
-
-      // Guest position reconciliation:
-      // Only hard-snap if the server says we're significantly off (teleport/death/revive).
-      // For normal play, trust local physics to stay close enough.
-      if (rp.idx === _myPlayerIdx && player) {
-        const dx = rp.x - player.x, dy = rp.y - player.y;
-        const dist = Math.sqrt(dx*dx+dy*dy);
-        if (dist > 80) {
-          // Large correction (death/revive/wall-warp) — hard snap
-          player.x = rp.x; player.y = rp.y;
-        } else if (dist > 4) {
-          // Small drift — gently nudge toward authoritative position (won't feel laggy)
-          player.x += dx * 0.2;
-          player.y += dy * 0.2;
-        }
-        // else: within 4px, trust local physics completely
-        // Trail
-        if (!player.trail) player.trail = [];
-        const now = performance.now();
-        player.trail.push({ x: player.x, y: player.y, ts: now });
-        const cutoff = now - CFG.TRAIL_DURATION * 1000;
-        while (player.trail.length > CFG.TRAIL_MAX_PTS) player.trail.shift();
-        while (player.trail.length > 0 && player.trail[0].ts < cutoff) player.trail.shift();
+  // Merge float texts — only add ones we don't already have at the same spot
+  if (s.po) {
+    for (const p of s.po) {
+      if (!popups.some(ex=>ex.txt===p.txt&&Math.abs(ex.x-p.x)<4&&Math.abs(ex.y-p.y)<4)) {
+        popups.push({txt:p.txt,x:p.x,y:p.y,col:p.col,t:p.t,maxT:p.mt,vy:p.vy||0});
+      }
+    }
+  }
+  // Merge callouts
+  if (s.ca) {
+    for (const c of s.ca) {
+      if (!callouts.some(ex=>ex.txt===c.txt&&ex.t>0.1)) {
+        addCallout(c.txt, c.drama, c.col);
       }
     }
   }
 
-  // Build trails for all remote players from position updates
+  _playerDead[0] = !!s.p0dead;
+  _reviveTimer[0] = s.p0rv||0;
+
+  if (s.rp) {
+    for (const rp of s.rp) {
+      if (!rp) continue;
+      const existing = _remotePlayers[rp.idx]||{};
+      _remotePlayers[rp.idx] = {...rp, trail:existing.trail||[], vx:existing.vx||0, vy:existing.vy||0};
+      _playerDead[rp.idx] = !!rp.dead;
+      _reviveTimer[rp.idx] = rp.rv||0;
+
+      // For our own echoed position: ONLY snap on large teleports (revive/respawn)
+      // Local physics handles normal movement — no correction = no teleporting
+      if (rp.idx === _myPlayerIdx && player) {
+        const dx = rp.x-player.x, dy = rp.y-player.y;
+        if (Math.sqrt(dx*dx+dy*dy) > 120) { player.x=rp.x; player.y=rp.y; player.vx=0; player.vy=0; }
+      }
+    }
+  }
+
+  // Host player position + trail for mpDrawPlayers
   if (s.p) {
-    const existing = _remotePlayers[0] || {};
     if (!_remotePlayers[0]) _remotePlayers[0] = {};
+    const ex = _remotePlayers[0];
+    if (!ex.trail) ex.trail = [];
     const now = performance.now();
-    if (!existing.trail) existing.trail = [];
-    existing.trail.push({ x: s.p.x, y: s.p.y, ts: now });
-    const cutoff = now - CFG.TRAIL_DURATION * 1000;
-    while (existing.trail.length > CFG.TRAIL_MAX_PTS) existing.trail.shift();
-    while (existing.trail.length > 0 && existing.trail[0].ts < cutoff) existing.trail.shift();
-    _remotePlayers[0] = Object.assign(_remotePlayers[0], {
-      idx: 0, x: s.p.x, y: s.p.y,
-      name: (s.rp?.find(r=>r?.idx===0)?.name) || LOBBY[0]?.name || 'HOST',
-      color: (s.rp?.find(r=>r?.idx===0)?.color) || LOBBY[0]?.color || PLAYER_COLORS[0],
-      dead: !!s.p0dead, rv: s.p0rv||0,
-      trail: existing.trail,
+    ex.trail.push({x:s.p.x,y:s.p.y,ts:now});
+    const cutoff = now - CFG.TRAIL_DURATION*1000;
+    while (ex.trail.length > CFG.TRAIL_MAX_PTS) ex.trail.shift();
+    while (ex.trail.length > 0 && ex.trail[0].ts < cutoff) ex.trail.shift();
+    Object.assign(_remotePlayers[0], {
+      idx:0, x:s.p.x, y:s.p.y,
+      name:(s.rp?.find(r=>r?.idx===0)?.name)||LOBBY[0]?.name||'HOST',
+      color:(s.rp?.find(r=>r?.idx===0)?.color)||LOBBY[0]?.color||PLAYER_COLORS[0],
+      dead:!!s.p0dead, rv:s.p0rv||0, trail:ex.trail,
     });
     _playerDead[0] = !!s.p0dead;
   }
 
-  if (!player) player = { x:AX+AS/2, y:AY+AS/2, vx:0, vy:0, trail:[] };
+  if (!player) player = {x:AX+AS/2,y:AY+AS/2,vx:0,vy:0,trail:[]};
 }
 
 /** Called each frame by main loop — emit state (host) or inputs (guest) */
@@ -3480,23 +3501,21 @@ let _mpLastEmit = 0;
 function mpTick(ts) {
   if (!_socket) return;
   if (_mpMode === 'host' && MODE === 'play') {
-    if (ts - _mpLastEmit > 30) {  // ~33Hz — smooth remote player movement
+    if (ts - _mpLastEmit > 30) {
       _socket.emit('game_state', _mpBuildState());
       _mpLastEmit = ts;
     }
   }
   if (_mpMode === 'guest') {
-    // Send inputs whenever we're in an active game session:
-    // - MODE='play' (normal play or downed-but-waiting-for-revive)
-    // This allows the host to track our position for revival proximity.
     if (MODE === 'play') {
+      // Send keys AND current position — host uses position directly, no physics divergence
       _socket.emit('player_input', {
-        ArrowLeft:  !!KEYS['ArrowLeft'],  ArrowRight: !!KEYS['ArrowRight'],
-        ArrowUp:    !!KEYS['ArrowUp'],    ArrowDown:  !!KEYS['ArrowDown'],
-        a: !!KEYS['a'], d: !!KEYS['d'], w: !!KEYS['w'], s: !!KEYS['s'],
+        ArrowLeft:!!KEYS['ArrowLeft'], ArrowRight:!!KEYS['ArrowRight'],
+        ArrowUp:!!KEYS['ArrowUp'],    ArrowDown:!!KEYS['ArrowDown'],
+        a:!!KEYS['a'], d:!!KEYS['d'], w:!!KEYS['w'], s:!!KEYS['s'],
+        px: player?.x, py: player?.y,
       });
     }
-    // Apply received state regardless of current mode (handles downed overlay)
     if (_remoteState) { _mpApplyRemoteState(_remoteState); _remoteState = null; }
   }
 }
