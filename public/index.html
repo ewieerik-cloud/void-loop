@@ -3102,15 +3102,12 @@ C.addEventListener('click',e=>{
       _mpMode='guest'; _mpRoomCode=code; _myPlayerIdx=1;
       _socket.emit('join_room',{roomCode:code,name,color});
     }
-    // LAUNCH — host calls init() immediately (no echo race), guests receive game_start
+    // LAUNCH — emit to server, server echoes game_start back to ALL (including host)
     if(inBtn(BTNS.launch)){
       if(_mpMode==='host'&&_socket){
-        _mpLastEvent = 'LAUNCH_clicked';
-        _lastTs=performance.now();
-        init();                       // host starts right now
-        _socket.emit('game_start');   // guests will receive this and call init()
+        _socket.emit('game_start');   // server echoes to all, everyone starts on receipt
       } else if(_mpMode!=='guest'){
-        _lastTs=performance.now(); init();
+        _lastTs=performance.now(); init(); // solo play
       }
     }
     if(inBtn(BTNS.lobby_back)){
@@ -3172,7 +3169,6 @@ let _mpJoining    = false;  // True while waiting for join confirmation
 let _mpJoinInput  = '';     // Room code typed in JOIN field
 let _mpJoinError  = '';     // Error message for join attempts
 let _mpJoinFocus  = false;  // Whether join input field is focused
-let _pendingGameStart = false; // game_start arrived before room_joined confirmed
 
 // Host only: latest inputs received from each guest   { idx → {keys} }
 let _guestInputs  = {};
@@ -3222,8 +3218,6 @@ function mpInit() {
     LOBBY        = _lobbyFromSnapshot(lobby);
     _mpJoining   = false;
     _mpJoinError = '';
-    // If game_start arrived before this confirmation, launch now
-    if (_pendingGameStart) { _pendingGameStart=false; _lastTs=performance.now(); init(); return; }
     resize(); MODE = 'lobby'; playMusic('lobby');
   });
 
@@ -3240,13 +3234,10 @@ function mpInit() {
     _mpMode = 'solo'; _mpRoomCode = null; _myPlayerIdx = 0;
   });
 
-  // ALL players receive game_start — host ignores it (already called init()), guests launch.
+  // ALL players start on server's authoritative game_start echo (host no longer self-starts)
   _socket.on('game_start', () => {
-    if (_mpMode === 'host') return;   // host already started
-    if (MODE === 'play') return;       // already in a game
-    // If still waiting for room_joined confirmation, store intent and fire on confirm
-    if (_mpJoining || !_mpRoomCode) { _pendingGameStart = true; return; }
-    _mpMode = 'guest';
+    if (MODE === 'play') return;
+    if (!_mpRoomCode) return;
     _lastTs = performance.now();
     init();
   });
@@ -3359,9 +3350,28 @@ function _mpUpdateGuestPlayers(dt) {
     const gp = _remotePlayers[idx];
     if (!gp.trail) gp.trail = [];
 
-    // Use position sent by guest — no host-side physics so no divergence/teleporting
-    if (!_playerDead[idx] && input.px !== undefined) {
-      gp.x = input.px; gp.y = input.py;
+    // Use received keys to compute guest position on host — single authority
+    if (!_playerDead[idx]) {
+      let ax=0,ay=0;
+      if(input.ArrowLeft||input.a)ax-=CFG.P_ACCEL;
+      if(input.ArrowRight||input.d)ax+=CFG.P_ACCEL;
+      if(input.ArrowUp||input.w)ay-=CFG.P_ACCEL;
+      if(input.ArrowDown||input.s)ay+=CFG.P_ACCEL;
+      if(!gp.vx)gp.vx=0; if(!gp.vy)gp.vy=0;
+      gp.vx+=ax*dt; gp.vy+=ay*dt;
+      const pf=Math.exp(-CFG.P_DAMP*dt); gp.vx*=pf; gp.vy*=pf;
+      const ps=Math.sqrt(gp.vx**2+gp.vy**2);
+      if(ps>CFG.P_MAX_SPEED){gp.vx=gp.vx/ps*CFG.P_MAX_SPEED;gp.vy=gp.vy/ps*CFG.P_MAX_SPEED;}
+      gp.x+=gp.vx*dt; gp.y+=gp.vy*dt;
+      if(CFG.WRAP_WALLS){
+        if(gp.x-CFG.P_RADIUS<AX)gp.x=AX+AS-CFG.P_RADIUS;
+        if(gp.x+CFG.P_RADIUS>AX+AS)gp.x=AX+CFG.P_RADIUS;
+        if(gp.y-CFG.P_RADIUS<AY)gp.y=AY+AS-CFG.P_RADIUS;
+        if(gp.y+CFG.P_RADIUS>AY+AS)gp.y=AY+CFG.P_RADIUS;
+      }else{
+        gp.x=Math.max(AX+CFG.P_RADIUS,Math.min(AX+AS-CFG.P_RADIUS,gp.x));
+        gp.y=Math.max(AY+CFG.P_RADIUS,Math.min(AY+AS-CFG.P_RADIUS,gp.y));
+      }
     }
 
     // Keep dead/rv on the object for mpDrawPlayers
@@ -3451,11 +3461,9 @@ function _mpApplyRemoteState(s) {
       _playerDead[rp.idx] = !!rp.dead;
       _reviveTimer[rp.idx] = rp.rv||0;
 
-      // For our own echoed position: ONLY snap on large teleports (revive/respawn)
-      // Local physics handles normal movement — no correction = no teleporting
+      // Apply host-authoritative position for this guest's own player
       if (rp.idx === _myPlayerIdx && player) {
-        const dx = rp.x-player.x, dy = rp.y-player.y;
-        if (Math.sqrt(dx*dx+dy*dy) > 120) { player.x=rp.x; player.y=rp.y; player.vx=0; player.vy=0; }
+        player.x=rp.x; player.y=rp.y; player.vx=0; player.vy=0;
       }
     }
   }
@@ -3499,7 +3507,6 @@ function mpTick(ts) {
         ArrowLeft:!!KEYS['ArrowLeft'], ArrowRight:!!KEYS['ArrowRight'],
         ArrowUp:!!KEYS['ArrowUp'],    ArrowDown:!!KEYS['ArrowDown'],
         a:!!KEYS['a'], d:!!KEYS['d'], w:!!KEYS['w'], s:!!KEYS['s'],
-        px: player?.x, py: player?.y,
       });
     }
     if (_remoteState) { _mpApplyRemoteState(_remoteState); _remoteState = null; }
@@ -3659,38 +3666,8 @@ function loop(ts){
     if(_mpMode !== 'guest') {
       gameUpdate(dt,ts);
       _mpUpdateGuestPlayers(dt); // HOST: move remote players, handle revival
-    } else {
-      // GUEST: run LOCAL movement physics so controls feel immediate (no lag).
-      // The host's state sync reconciles any drift — gameplay is still host-authoritative.
-      if(player && !_playerDead[_myPlayerIdx]) {
-        let ax=0,ay=0;
-        if(KEYS['ArrowLeft']||KEYS['a']||KEYS['A'])ax-=CFG.P_ACCEL;
-        if(KEYS['ArrowRight']||KEYS['d']||KEYS['D'])ax+=CFG.P_ACCEL;
-        if(KEYS['ArrowUp']||KEYS['w']||KEYS['W'])ay-=CFG.P_ACCEL;
-        if(KEYS['ArrowDown']||KEYS['s']||KEYS['S'])ay+=CFG.P_ACCEL;
-        player.vx=(player.vx||0)+ax*dt; player.vy=(player.vy||0)+ay*dt;
-        const pf=Math.exp(-CFG.P_DAMP*dt); player.vx*=pf; player.vy*=pf;
-        const ps=Math.sqrt(player.vx**2+player.vy**2);
-        if(ps>CFG.P_MAX_SPEED){player.vx=player.vx/ps*CFG.P_MAX_SPEED;player.vy=player.vy/ps*CFG.P_MAX_SPEED;}
-        player.x+=player.vx*dt; player.y+=player.vy*dt;
-        // Wrap walls — must match host physics exactly
-        if(CFG.WRAP_WALLS){
-          if(player.x-CFG.P_RADIUS<AX){player.x=AX+AS-CFG.P_RADIUS;}
-          if(player.x+CFG.P_RADIUS>AX+AS){player.x=AX+CFG.P_RADIUS;}
-          if(player.y-CFG.P_RADIUS<AY){player.y=AY+AS-CFG.P_RADIUS;}
-          if(player.y+CFG.P_RADIUS>AY+AS){player.y=AY+CFG.P_RADIUS;}
-        }else{
-          player.x=Math.max(AX+CFG.P_RADIUS,Math.min(AX+AS-CFG.P_RADIUS,player.x));
-          player.y=Math.max(AY+CFG.P_RADIUS,Math.min(AY+AS-CFG.P_RADIUS,player.y));
-        }
-        // Trail
-        if(!player.trail)player.trail=[];
-        player.trail.push({x:player.x,y:player.y,ts});
-        while(player.trail.length>CFG.TRAIL_MAX_PTS)player.trail.shift();
-        const cutoffG=ts-CFG.TRAIL_DURATION*1000;
-        while(player.trail.length>0&&player.trail[0].ts<cutoffG)player.trail.shift();
-      }
     }
+    // GUEST: no local physics — host computes all positions, guest renders received state
     stepParts(dt);
     stepMatrixFX(dt);
     if(popups){for(let i=popups.length-1;i>=0;i--){popups[i].t-=dt;popups[i].y+=popups[i].vy*dt;if(popups[i].t<=0)popups.splice(i,1);}}
