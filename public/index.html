@@ -3461,12 +3461,15 @@ function _mpApplyRemoteState(s) {
     for (const rp of s.rp) {
       if (!rp) continue;
       const existing = _remotePlayers[rp.idx]||{};
-      _remotePlayers[rp.idx] = {...rp, trail:existing.trail||[], vx:existing.vx||0, vy:existing.vy||0};
+      _remotePlayers[rp.idx] = {...rp,
+        // Keep smoothed display position; only snap on large teleport
+        x: existing.x||rp.x, y: existing.y||rp.y,
+        nx: rp.x, ny: rp.y,  // lerp targets
+        trail:existing.trail||[], vx:existing.vx||0, vy:existing.vy||0};
       _playerDead[rp.idx] = !!rp.dead;
       _reviveTimer[rp.idx] = rp.rv||0;
 
       // For our own echoed position: ONLY snap on large teleports (revive/respawn).
-      // Local physics handles normal movement — zeroing velocity causes the heavy/sluggish feel.
       if (rp.idx === _myPlayerIdx && player) {
         const dx = rp.x-player.x, dy = rp.y-player.y;
         if (Math.sqrt(dx*dx+dy*dy) > 120) { player.x=rp.x; player.y=rp.y; player.vx=0; player.vy=0; }
@@ -3474,21 +3477,16 @@ function _mpApplyRemoteState(s) {
     }
   }
 
-  // Host player position + trail for mpDrawPlayers
+  // Host player position — store as lerp target, not direct snap
   if (s.p) {
-    if (!_remotePlayers[0]) _remotePlayers[0] = {};
+    if (!_remotePlayers[0]) _remotePlayers[0] = {x:s.p.x, y:s.p.y, trail:[]};
     const ex = _remotePlayers[0];
-    if (!ex.trail) ex.trail = [];
-    const now = performance.now();
-    ex.trail.push({x:s.p.x,y:s.p.y,ts:now});
-    const cutoff = now - CFG.TRAIL_DURATION*1000;
-    while (ex.trail.length > CFG.TRAIL_MAX_PTS) ex.trail.shift();
-    while (ex.trail.length > 0 && ex.trail[0].ts < cutoff) ex.trail.shift();
-    Object.assign(_remotePlayers[0], {
-      idx:0, x:s.p.x, y:s.p.y,
+    ex.nx = s.p.x; ex.ny = s.p.y; // lerp target; mpLerpRemotePlayers moves x/y and pushes trail
+    Object.assign(ex, {
+      idx:0,
       name:(s.rp?.find(r=>r?.idx===0)?.name)||LOBBY[0]?.name||'HOST',
       color:(s.rp?.find(r=>r?.idx===0)?.color)||LOBBY[0]?.color||PLAYER_COLORS[0],
-      dead:!!s.p0dead, rv:s.p0rv||0, trail:ex.trail,
+      dead:!!s.p0dead, rv:s.p0rv||0,
     });
     _playerDead[0] = !!s.p0dead;
   }
@@ -3519,7 +3517,28 @@ function mpTick(ts) {
   }
 }
 
-/** Draw remote player dots, trails, dead ghosts, revival rings */
+/** Each frame: smoothly move remote player display positions toward their network targets */
+function mpLerpRemotePlayers(dt) {
+  const f = Math.min(1, dt * 18); // ~18 = closes gap in ~4 frames at 60fps; feel instant but no jump
+  const myIdx = _myPlayerIdx;
+  const now = performance.now();
+  for (let i = 0; i < _remotePlayers.length; i++) {
+    const rp = _remotePlayers[i];
+    if (!rp || i === myIdx || rp.nx === undefined) continue;
+    const dx = rp.nx - rp.x, dy = rp.ny - rp.y;
+    const dist = Math.sqrt(dx*dx+dy*dy);
+    if (dist > 200) { rp.x = rp.nx; rp.y = rp.ny; } // snap on large teleport
+    else { rp.x += dx * f; rp.y += dy * f; }
+    // Push trail from the smoothed position
+    if (!rp.dead) {
+      if (!rp.trail) rp.trail = [];
+      rp.trail.push({x:rp.x, y:rp.y, ts:now});
+      const cutoff = now - CFG.TRAIL_DURATION*1000;
+      while (rp.trail.length > CFG.TRAIL_MAX_PTS) rp.trail.shift();
+      while (rp.trail.length > 0 && rp.trail[0].ts < cutoff) rp.trail.shift();
+    }
+  }
+}
 function mpDrawPlayers(ts) {
   const myIdx = _myPlayerIdx;
   for (let i = 0; i < _remotePlayers.length; i++) {
@@ -3687,6 +3706,7 @@ function loop(ts){
   }
   if(_inviteCopied){_inviteCopiedTimer=Math.max(0,_inviteCopiedTimer-dt);if(_inviteCopiedTimer<=0)_inviteCopied=false;}
   mpTick(ts); // emit state (host) or inputs (guest)
+  mpLerpRemotePlayers(dt); // smooth remote player display positions toward network targets
   render(ts);
   requestAnimationFrame(loop);
 }
