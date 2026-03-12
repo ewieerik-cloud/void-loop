@@ -3727,6 +3727,39 @@ function loop(ts){
       while(player.trail.length>CFG.TRAIL_MAX_PTS)player.trail.shift();
       const cutoffG=ts-CFG.TRAIL_DURATION*1000;
       while(player.trail.length>0&&player.trail[0].ts<cutoffG)player.trail.shift();
+
+      // GUEST LOCAL FX — immediate visual/audio feedback; host remains authoritative.
+      // colls and enemies are the host-synced arrays. We never mutate state here,
+      // just fire local particles+sound so interactions feel instant.
+
+      // Orb pickup feedback: _localFx flag prevents double-fire; auto-cleared when
+      // _mpApplyRemoteState replaces the colls array with a fresh one from host.
+      if(grp && colls){
+        const orbR=CFG.C_RADIUS*(1+(orbStreak||0)*0.2);
+        for(const c of colls){
+          if(c.done||c._localFx)continue;
+          if(dst(player.x,player.y,c.x,c.y)<CFG.P_RADIUS+orbR){
+            c._localFx=true;
+            FX_COLLECT(c.x,c.y);
+            sndOrb();
+            const _lop=CFG.SCORE_PER_COLL+(orbStreak||0)*10;
+            addFloatText('+'+_lop,c.x,c.y,CFG.COL.coll);
+          }
+        }
+      }
+
+      // Enemy hit feedback: fire death FX + set local dead flag immediately.
+      // Host will confirm via state; _playerDead[myIdx] being set prevents movement next frame.
+      if(!isInvincible()&&enemies&&!_playerDead[_myPlayerIdx]){
+        for(const e of enemies){
+          if((e.spawnAge||0)<1.5)continue;
+          if(dst(player.x,player.y,e.x,e.y)<CFG.P_RADIUS+CFG.E_RADIUS){
+            FX_DEATH(player.x,player.y);snd('death');
+            _playerDead[_myPlayerIdx]=true; // local anticipation; host confirms next tick
+            break;
+          }
+        }
+      }
     }
     stepParts(dt);
     stepMatrixFX(dt);
