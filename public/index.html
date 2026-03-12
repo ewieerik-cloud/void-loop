@@ -3469,10 +3469,16 @@ function _mpApplyRemoteState(s) {
       _playerDead[rp.idx] = !!rp.dead;
       _reviveTimer[rp.idx] = rp.rv||0;
 
-      // For our own echoed position: ONLY snap on large teleports (revive/respawn).
+      // Reconcile local predicted position against authoritative server echo.
+      // Do NOT apply incremental nudges — host is always ~30ms behind local prediction,
+      // so nudging player toward old server position causes constant visible stutter.
+      // Only hard-snap for genuine teleports (revive, spawn) where positions are wildly apart.
       if (rp.idx === _myPlayerIdx && player) {
         const dx = rp.x-player.x, dy = rp.y-player.y;
-        if (Math.sqrt(dx*dx+dy*dy) > 120) { player.x=rp.x; player.y=rp.y; player.vx=0; player.vy=0; }
+        if (Math.sqrt(dx*dx+dy*dy) > 350) {
+          player.x=rp.x; player.y=rp.y; player.vx=0; player.vy=0;
+        }
+        // Trust local prediction for everything else
       }
     }
   }
