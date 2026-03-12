@@ -53,6 +53,11 @@ io.on('connection', (socket) => {
 
   /* ── CREATE ROOM ─────────────────────────── */
   socket.on('create_room', ({ name, color }) => {
+    // If already in a room, leave it first to prevent orphaned rooms
+    if (socket._roomCode) {
+      console.log(`[create_room] ${socket.id} already owns room ${socket._roomCode} — leaving first`);
+      _handlePlayerLeave(socket);
+    }
     const code = genCode();
     const room = { code, host: socket.id, players: new Map() };
     const player = { idx: 0, name: name || 'PILOT', color: color || '#ff3300', socketId: socket.id };
@@ -62,13 +67,13 @@ io.on('connection', (socket) => {
     socket.join(code);
     socket._roomCode = code;
 
+    console.log(`[create_room] ${name} (${socket.id}) created room ${code}`);
     // ► HOST: receives room_created with their room code
     socket.emit('room_created', {
       roomCode: code,
       playerIdx: 0,
       lobby: lobbySnapshot(room)
     });
-    console.log(`[room] Created ${code} by ${name}`);
   });
 
   /* ── JOIN ROOM ───────────────────────────── */
@@ -86,6 +91,7 @@ io.on('connection', (socket) => {
     socket.join(code);
     socket._roomCode = code;
 
+    console.log(`[join_room] ${name} (${socket.id}) joining room ${code} as P${idx+1}`);
     // ► GUEST: receives room_joined with their player index
     socket.emit('room_joined', {
       roomCode: code,
@@ -95,17 +101,16 @@ io.on('connection', (socket) => {
 
     // ► ALL IN ROOM: lobby updated with new player
     io.to(code).emit('lobby_update', { lobby: lobbySnapshot(room) });
-    console.log(`[room] ${name} joined ${code} as P${idx+1}`);
+    console.log(`[join_room] room ${code} now has ${room.players.size} players`);
   });
 
   /* ── GAME START (host only) ──────────────── */
   socket.on('game_start', () => {
     const room = rooms.get(socket._roomCode);
-    console.log(`[game_start] from ${socket.id}, room=${socket._roomCode}, host=${room?.host}, match=${room?.host === socket.id}`);
+    console.log(`[game_start] from ${socket.id}, active_room=${socket._roomCode}, host=${room?.host}, is_host=${room?.host === socket.id}, players=${room?.players.size}`);
     if (!room || room.host !== socket.id) return;
-    // Broadcast to ALL in room — client skips if already in play mode
     io.to(room.code).emit('game_start');
-    console.log(`[room] Game started in ${room.code} — notified ${room.players.size} players`);
+    console.log(`[game_start] sent to room ${room.code} — ${room.players.size} players notified`);
   });
 
   /* ── GAME STATE RELAY (host → guests) ───── */
